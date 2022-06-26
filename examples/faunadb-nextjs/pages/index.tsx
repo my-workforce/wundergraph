@@ -2,17 +2,9 @@ import { NextPage } from 'next';
 import { useQuery, withWunderGraph } from '../components/generated/nextjs';
 
 const Home: NextPage = () => {
-	const user = useQuery.UserByEmail({
-		input: {
-			email: 'jens@wundergraph.com',
-		},
-	});
+	const stores = useQuery.AllStores();
 	const refresh = () => {
-		user.refetch({
-			input: {
-				email: 'jens@wundergraph.com',
-			},
-		});
+		stores.refetch();
 	};
 	return (
 		<div>
@@ -44,7 +36,7 @@ const Home: NextPage = () => {
 					</div>
 				</div>
 				<h1 className="text-slate-900 font-extrabold text-4xl sm:text-5xl lg:text-6xl tracking-tight text-center dark:text-white">
-					Postgres & Next.js
+					FaunaDB & Next.js
 				</h1>
 				<p className="mt-6 text-lg text-slate-600 text-center max-w-3xl mx-auto dark:text-slate-400">
 					Use{' '}
@@ -61,9 +53,9 @@ const Home: NextPage = () => {
 					<div className="mx-auto flex max-w-sm flex-col items-center">
 						<p className="mt-3 mb-8 text-center text-black/80">
 							This is the result of your{' '}
-							<code className="font-mono font-medium text-amber-500 font-bold">UserByEmail</code> operation.
+							<code className="font-mono font-medium text-amber-500 font-bold">AllStores</code> operation.
 						</p>
-						<code className="p-3">{JSON.stringify(user, null, 2)}</code>
+						<code className="p-3">{JSON.stringify(stores, null, 2)}</code>
 					</div>
 					<div className="flex justify-center mt-8">
 						<button
