@@ -704,7 +704,8 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	operationHash := shared.Hash.Sum64()
 
 	h.preparedMux.RLock()
-	prepared, exists := h.prepared[operationHash]
+	var prepared planWithExtractedVariables
+	exists := false
 	h.preparedMux.RUnlock()
 	if !exists {
 		prepared, err = h.preparePlan(operationHash, requestOperationName, shared)
