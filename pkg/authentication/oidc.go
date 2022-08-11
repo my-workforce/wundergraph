@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -57,6 +58,14 @@ type Claims struct {
 func (h *OpenIDConnectCookieHandler) Register(authorizeRouter, callbackRouter *mux.Router, config OpenIDConnectConfig, hooks Hooks) {
 
 	ctx := context.Background()
+
+	if !h.isValidIssuer(config.Issuer) {
+		h.log.Error("oidc.Register failed, invalid issuer, must be valid URL",
+			abstractlogger.String("providerID", config.ProviderID),
+			abstractlogger.String("issuer", config.Issuer),
+		)
+		return
+	}
 
 	provider := h.createProvider(ctx, config)
 
@@ -217,24 +226,25 @@ func (h *OpenIDConnectCookieHandler) Register(authorizeRouter, callbackRouter *m
 			return
 		}
 
-		accessTokenJSON := mustBearerTokenToJSON(accessToken)
-		idTokenJSON := mustBearerTokenToJSON(idToken)
+		accessTokenJSON := tryParseJWT(accessToken)
+		idTokenJSON := tryParseJWT(idToken)
 
 		user := User{
-			ProviderName:  "oidc",
-			ProviderID:    config.ProviderID,
-			Email:         claims.Email,
-			EmailVerified: claims.EmailVerified,
-			Name:          claims.Name,
-			FirstName:     claims.GivenName,
-			LastName:      claims.FamilyName,
-			UserID:        claims.Sub,
-			AvatarURL:     claims.Picture,
-			Location:      claims.Locale,
-			ExpiresAt:     oauth2Token.Expiry,
-			IdToken:       idTokenJSON,
-			AccessToken:   accessTokenJSON,
-			RawIDToken:    idToken,
+			ProviderName:   "oidc",
+			ProviderID:     config.ProviderID,
+			Email:          claims.Email,
+			EmailVerified:  claims.EmailVerified,
+			Name:           claims.Name,
+			FirstName:      claims.GivenName,
+			LastName:       claims.FamilyName,
+			UserID:         claims.Sub,
+			AvatarURL:      claims.Picture,
+			Location:       claims.Locale,
+			ExpiresAt:      oauth2Token.Expiry,
+			AccessToken:    accessTokenJSON,
+			RawAccessToken: accessToken,
+			RawIDToken:     idToken,
+			IdToken:        idTokenJSON,
 		}
 
 		hooks.handlePostAuthentication(r.Context(), user)
@@ -264,6 +274,11 @@ func (h *OpenIDConnectCookieHandler) Register(authorizeRouter, callbackRouter *m
 
 		http.Redirect(w, r, redirect, http.StatusFound)
 	})
+}
+
+func (h *OpenIDConnectCookieHandler) isValidIssuer(issuer string) bool {
+	_, urlErr := url.ParseRequestURI(issuer)
+	return urlErr == nil
 }
 
 func (h *OpenIDConnectCookieHandler) createProvider(ctx context.Context, config OpenIDConnectConfig) *oidc.Provider {

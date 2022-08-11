@@ -21,8 +21,8 @@ import type { SDLResponse } from './generated/models';
 export default configureWunderGraphServer<HooksConfig, InternalClient>(() => ({
 	hooks: {
 		authentication: {
-			postAuthentication: async (hook) => {},
-			mutatingPostAuthentication: async (hook) => {
+			postAuthentication: async ({ user }) => {},
+			mutatingPostAuthentication: async ({ user }) => {
 				return {
 					user: {
 						name: 'John Doe',
@@ -41,22 +41,29 @@ export default configureWunderGraphServer<HooksConfig, InternalClient>(() => ({
 		},
 		global: {
 			httpTransport: {
-				onOriginResponse: {
-					enableForAllOperations: true,
-					hook: async (hook) => {
-						console.log('########onResponse##########', hook.clientRequest);
-					},
-				},
 				onOriginRequest: {
 					enableForAllOperations: true,
-					hook: async (hook) => {
-						console.log('########onRequest##########', hook.clientRequest.method);
+					hook: async ({ request }) => {
+						request.headers.set('X-Wundergraph-Test', 'test');
+						console.log('onOriginRequest', request.headers);
+						return request;
+					},
+				},
+				onOriginResponse: {
+					enableForAllOperations: true,
+					hook: async ({ response }) => {
+						console.log('onOriginResponse', response.headers.all());
+						return 'skip';
 					},
 				},
 			},
 		},
 		queries: {
 			Dragons: {
+				mutatingPostResolve: async (hook) => {
+					console.log('########mutatingPostResolve##########', hook.clientRequest.method);
+					return hook.response;
+				},
 				preResolve: async ({ user, log, clientRequest, internalClient }) => {
 					clientRequest.headers.append('X-Wundergraph', 'foo');
 					clientRequest.headers.delete('Cache-Control');
@@ -86,6 +93,7 @@ export default configureWunderGraphServer<HooksConfig, InternalClient>(() => ({
 		{
 			apiNamespace: 'ibm_jsp',
 			serverName: 'ibm_jsp',
+			// @ts-ignore
 			schema: createGraphQLSchema([jsonPlaceholder]).then((r) => r.schema),
 		},
 		{

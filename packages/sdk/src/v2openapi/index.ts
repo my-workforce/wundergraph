@@ -1099,8 +1099,9 @@ class RESTApiBuilder {
 		};
 	};
 	private prettyFieldName = (input: string): string => {
-		const underscore = input.split('_').reduce((prev, next) => prev + next[0].toUpperCase() + next.substring(1));
-		return underscore.split('-').reduce((prev, next) => prev + next[0].toUpperCase() + next.substring(1));
+		let underscore = input.split('_').reduce((prev, next) => prev + next[0].toUpperCase() + next.substring(1));
+		underscore = underscore.split('-').reduce((prev, next) => prev + next[0].toUpperCase() + next.substring(1));
+		return underscore.replace(/\/+/g, '_');
 	};
 	private resolveFieldName = (operationObject: OpenAPIV3.OperationObject, path: string, verb: HTTPMethod): string => {
 		if (operationObject.operationId) {
@@ -1117,7 +1118,7 @@ class RESTApiBuilder {
 					const trimmed = current.substring(1, current.length - 1);
 					return prev + 'By' + trimmed[0].toUpperCase() + trimmed.substring(1);
 				}
-				return prev + current[0].toUpperCase() + current.substring(1);
+				return prev + current[0]?.toUpperCase() + current.substring(1);
 			});
 		return hTTPMethodToJSON(verb).toLowerCase() + formattedPath[0].toUpperCase() + formattedPath.substring(1);
 	};
@@ -1131,7 +1132,7 @@ class RESTApiBuilder {
 				const trimmed = current.substring(1, current.length - 1);
 				return prev + trimmed[0].toUpperCase() + trimmed.substring(1);
 			}
-			return prev + current[0].toUpperCase() + current.substring(1);
+			return prev + current[0]?.toUpperCase() + current.substring(1);
 		});
 		return hTTPMethodToJSON(verb).toLowerCase() + formattedPath[0] + formattedPath.substring(1) + 'Input';
 	}

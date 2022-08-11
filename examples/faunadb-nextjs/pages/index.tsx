@@ -19,7 +19,7 @@ const Home: NextPage = () => {
 							x="0px"
 							y="0px"
 							viewBox="0 0 1000 1000"
-							enable-background="new 0 0 1000 1000"
+							enableBackground="new 0 0 1000 1000"
 							xmlSpace="preserve"
 						>
 							<path
@@ -65,7 +65,7 @@ const Home: NextPage = () => {
 							<svg
 								stroke="currentColor"
 								fill="currentColor"
-								stroke-width="0"
+								strokeWidth="0"
 								viewBox="0 0 24 24"
 								className="w-6 h-6 mr-2 -ml-1"
 								height="1em"

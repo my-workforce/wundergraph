@@ -32,6 +32,12 @@ type ApiTransport struct {
 	hooksClient                *hooks.Client
 }
 
+func NewApiTransportFactory(api *wgpb.Api, hooksClient *hooks.Client, enableDebugMode bool) func(tripper http.RoundTripper) http.RoundTripper {
+	return func(tripper http.RoundTripper) http.RoundTripper {
+		return NewApiTransport(tripper, api, hooksClient, enableDebugMode)
+	}
+}
+
 func NewApiTransport(tripper http.RoundTripper, api *wgpb.Api, hooksClient *hooks.Client, enableDebugMode bool) http.RoundTripper {
 	transport := &ApiTransport{
 		roundTripper:               tripper,
@@ -186,6 +192,11 @@ func (t *ApiTransport) internalGraphQLRoundTrip(request *http.Request) (res *htt
 
 	requestBody := buf.Bytes()
 
+	requestBody, err = jsonparser.Set(requestBody, []byte("{}"), "__wg")
+	if err != nil {
+		return nil, err
+	}
+
 	if user != nil {
 		userData, err := json.Marshal(*user)
 		if err != nil {
@@ -242,7 +253,7 @@ func (t *ApiTransport) handleOnRequestHook(r *http.Request, metaData *OperationM
 	}
 	if user := authentication.UserFromContext(r.Context()); user != nil {
 		if userJson, err := json.Marshal(user); err == nil {
-			hookData, _ = jsonparser.Set(hookData, userJson, "user")
+			hookData, _ = jsonparser.Set(hookData, userJson, "__wg", "user")
 		}
 	}
 
@@ -297,7 +308,7 @@ func (t *ApiTransport) handleOnResponseHook(r *http.Response, metaData *Operatio
 	}
 	if user := authentication.UserFromContext(r.Request.Context()); user != nil {
 		if userJson, err := json.Marshal(user); err == nil {
-			hookData, _ = jsonparser.Set(hookData, userJson, "user")
+			hookData, _ = jsonparser.Set(hookData, userJson, "__wg", "user")
 		}
 	}
 

@@ -6,23 +6,24 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/jensneuse/abstractlogger"
 	"github.com/spf13/cobra"
 	"github.com/wundergraph/wundergraph/pkg/apihandler"
+	"github.com/wundergraph/wundergraph/pkg/files"
 	"github.com/wundergraph/wundergraph/pkg/node"
 	"github.com/wundergraph/wundergraph/pkg/scriptrunner"
 	"github.com/wundergraph/wundergraph/pkg/wundernodeconfig"
 )
 
 var (
-	startServerEntryPoint      string
 	excludeServer              bool
 	disableForceHttpsRedirects bool
 	enableIntrospection        bool
+	gracefulTimeout            int
+	configJsonFilename         string
 )
 
 // startCmd represents the start command
@@ -36,6 +37,16 @@ just running the engine as efficiently as possible without the dev overhead.
 If used without --exclude-server, make sure the server is available in this directory:
 {entrypoint}/bundle/server.js or override it with --server-entrypoint.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		entryPoints, err := files.GetWunderGraphEntryPoints(wundergraphDir, configEntryPointFilename, serverEntryPointFilename)
+		if err != nil {
+			return fmt.Errorf("could not find file or directory: %s", err)
+		}
+
+		configFile := path.Join(entryPoints.WunderGraphDirAbs, "generated", configJsonFilename)
+		if !files.FileExists(configFile) {
+			return fmt.Errorf("could not find configuration file: %s", configFile)
+		}
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -53,24 +64,31 @@ If used without --exclude-server, make sure the server is available in this dire
 		}
 
 		if !excludeServer {
-			wd, err := os.Getwd()
-			if err != nil {
-				log.Fatal("Could not get your current working directory")
+			serverScriptFile := path.Join("generated", "bundle", "server.js")
+			serverExecutablePath := path.Join(entryPoints.WunderGraphDirAbs, "generated", "bundle", "server.js")
+			if !files.FileExists(serverExecutablePath) {
+				return fmt.Errorf(`hooks server build artifact "%s" not found. Please use --exclude-server to disable the server`, path.Join(wundergraphDir, serverScriptFile))
 			}
 
-			serverOutFile := path.Join(wundergraphDir, "generated", "bundle", "server.js")
+			hooksEnv := []string{
+				"START_HOOKS_SERVER=true",
+				fmt.Sprintf("WG_ABS_DIR=%s", entryPoints.WunderGraphDirAbs),
+				fmt.Sprintf("HOOKS_TOKEN=%s", hooksJWT),
+				fmt.Sprintf("WG_MIDDLEWARE_PORT=%d", middlewareListenPort),
+				fmt.Sprintf("WG_LISTEN_ADDR=%s", listenAddr),
+			}
+
+			if enableDebugMode {
+				hooksEnv = append(hooksEnv, "LOG_LEVEL=debug")
+			}
+
 			hookServerRunner := scriptrunner.NewScriptRunner(&scriptrunner.Config{
-				Name:       "hooks-server-runner",
-				Executable: "node",
-				ScriptArgs: []string{serverOutFile},
-				Logger:     log,
-				ScriptEnv: append(os.Environ(),
-					"START_HOOKS_SERVER=true",
-					fmt.Sprintf("WG_ABS_DIR=%s", filepath.Join(wd, wundergraphDir)),
-					fmt.Sprintf("HOOKS_TOKEN=%s", hooksJWT),
-					fmt.Sprintf("WG_MIDDLEWARE_PORT=%d", middlewareListenPort),
-					fmt.Sprintf("WG_LISTEN_ADDR=%s", listenAddr),
-				),
+				Name:          "hooks-server-runner",
+				Executable:    "node",
+				AbsWorkingDir: entryPoints.WunderGraphDirAbs,
+				ScriptArgs:    []string{serverScriptFile},
+				Logger:        log,
+				ScriptEnv:     append(os.Environ(), hooksEnv...),
 			})
 
 			defer func() {
@@ -104,7 +122,7 @@ If used without --exclude-server, make sure the server is available in this dire
 		go func() {
 			err := n.StartBlocking(
 				node.WithConfigFileChange(configFileChangeChan),
-				node.WithFileSystemConfig(wunderGraphConfigFile),
+				node.WithFileSystemConfig(configFile),
 				node.WithHooksSecret(secret),
 				node.WithDebugMode(enableDebugMode),
 				node.WithForceHttpsRedirects(!disableForceHttpsRedirects),
@@ -129,9 +147,9 @@ If used without --exclude-server, make sure the server is available in this dire
 			log.Info("Context was canceled. Initialize WunderNode shutdown ....")
 		}
 
-		log.Info("Shutting down WunderNode ...")
-
-		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		gracefulTimeoutDur := time.Duration(gracefulTimeout) * time.Second
+		log.Info("Graceful shutdown WunderNode ...", abstractlogger.String("gracefulTimeout", gracefulTimeoutDur.String()))
+		ctx, cancel = context.WithTimeout(ctx, gracefulTimeoutDur)
 		defer cancel()
 
 		err = n.Shutdown(ctx)
@@ -147,10 +165,13 @@ If used without --exclude-server, make sure the server is available in this dire
 
 func init() {
 	rootCmd.AddCommand(startCmd)
-	startCmd.Flags().StringVar(&listenAddr, "listen-addr", "localhost:9991", "listen_addr is the host:port combination, WunderGraph should listen on.")
+	startCmd.Flags().StringVar(&listenAddr, "listen-addr", "localhost:9991", "listen-addr is the host:port combination, WunderGraph should listen on.")
+	startCmd.Flags().StringVarP(&configJsonFilename, "config", "c", "wundergraph.config.json", "filename to the generated wundergraph config")
 	startCmd.Flags().IntVar(&middlewareListenPort, "middleware-listen-port", 9992, "middleware-listen-port is the port which the WunderGraph middleware will bind to")
-	startCmd.Flags().StringVar(&startServerEntryPoint, "server-entrypoint", "", "entrypoint to start the server")
+	startCmd.Flags().IntVar(&gracefulTimeout, "graceful-timeout", 10, "graceful-timeout is the time in seconds the server has to graceful shutdown")
 	startCmd.Flags().BoolVar(&excludeServer, "exclude-server", false, "starts the engine without the server")
 	startCmd.Flags().BoolVar(&enableIntrospection, "enable-introspection", false, "enables GraphQL introspection on /%api%/%main%/graphql")
 	startCmd.Flags().BoolVar(&disableForceHttpsRedirects, "disable-force-https-redirects", false, "disables authentication to enforce https redirects")
+	startCmd.Flags().StringVar(&configEntryPointFilename, "entrypoint", "wundergraph.config.ts", "filename of node config")
+	startCmd.Flags().StringVar(&serverEntryPointFilename, "serverEntryPoint", "wundergraph.server.ts", "filename of the server config")
 }

@@ -1,6 +1,5 @@
 import { WunderGraphConfiguration } from '@wundergraph/protobuf';
 import FastifyGraceful from 'fastify-graceful-shutdown';
-import { HeadersObject } from 'headers-polyfill';
 import { Headers } from 'headers-polyfill';
 import process from 'node:process';
 import HooksPlugin from './plugins/hooks';
@@ -49,14 +48,10 @@ export interface ClientRequest<H = ClientRequestHeaders> {
 	headers: H;
 }
 
-interface OriginalClientRequest extends ClientRequest<HeadersObject> {}
-
 export interface WunderGraphRequest {
 	method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS' | 'CONNECT' | 'TRACE';
 	requestURI: string;
-	headers: {
-		[key: string]: string;
-	};
+	headers: Headers;
 	body: any;
 }
 
@@ -88,6 +83,7 @@ export interface WunderGraphUser<Role = any> {
 		[key: string]: any;
 	};
 	accessToken?: JSONObject;
+	rawAccessToken?: string;
 	idToken?: JSONObject;
 	rawIdToken?: string;
 }
@@ -173,7 +169,9 @@ const _configureWunderGraphServer = <GeneratedHooksConfig extends HooksConfigura
 	 */
 	if (process.env.START_HOOKS_SERVER === 'true') {
 		const fastify = Fastify({
-			logger: true,
+			logger: {
+				level: process.env.LOG_LEVEL || 'info',
+			},
 		});
 		startServer(fastify, hooksConfig, WG_CONFIG).catch((err) => {
 			fastify.log.error(err, 'Could not start the hook server');
@@ -191,7 +189,7 @@ export const startServer = async (
 ) => {
 	fastify.decorateRequest('ctx', null);
 
-	fastify.addHook<{ Body: { __wg: { user: WunderGraphUser; clientRequest?: OriginalClientRequest } } }>(
+	fastify.addHook<{ Body: { __wg: { user?: WunderGraphUser; clientRequest?: ClientRequest } } }>(
 		'preHandler',
 		async (req, reply) => {
 			req.ctx = {

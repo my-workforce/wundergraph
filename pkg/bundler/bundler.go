@@ -21,6 +21,7 @@ var NonNodeModuleReg = regexp.MustCompile(`^[^./]|^\.[^./]|^\.\.[^/]`) // Must n
 type Bundler struct {
 	name                  string
 	entryPoint            string
+	absWorkingDir         string
 	watchPaths            []string
 	ignorePaths           []string
 	log                   abstractlogger.Logger
@@ -28,45 +29,88 @@ type Bundler struct {
 	outFile               string
 	externalImports       []string
 	fileLoaders           []string
-	BuildDoneChan         chan struct{}
 	mu                    sync.Mutex
+	buildResult           *api.BuildResult
+	onAfterBundle         func()
 }
 
 type Config struct {
 	Name                  string
 	Logger                abstractlogger.Logger
+	AbsWorkingDir         string
 	SkipWatchOnEntryPoint bool
 	EntryPoint            string
 	WatchPaths            []string
 	IgnorePaths           []string
 	OutFile               string
+	OnAfterBundle         func()
 }
 
 func NewBundler(config Config) *Bundler {
 	return &Bundler{
 		name:                  config.Name,
+		absWorkingDir:         config.AbsWorkingDir,
 		outFile:               config.OutFile,
 		entryPoint:            config.EntryPoint,
 		watchPaths:            config.WatchPaths,
 		ignorePaths:           config.IgnorePaths,
 		skipWatchOnEntryPoint: config.SkipWatchOnEntryPoint,
-		BuildDoneChan:         make(chan struct{}),
+		onAfterBundle:         config.OnAfterBundle,
 		log:                   config.Logger,
 		fileLoaders:           []string{".graphql", ".gql", ".graphqls", ".yml", ".yaml"},
 	}
 }
 
-func (b *Bundler) Bundle(ctx context.Context) {
-	result := b.initialBuild()
-	if len(result.Errors) != 0 {
-		b.log.Fatal("Initial build failed",
-			abstractlogger.String("bundlerName", b.name),
-			abstractlogger.Any("errors", result.Errors),
-		)
+func (b *Bundler) Bundle() {
+	if b.buildResult != nil {
+		buildResult := b.buildResult.Rebuild()
+		b.buildResult = &buildResult
+		if len(b.buildResult.Errors) != 0 {
+			b.log.Fatal("Build failed",
+				abstractlogger.String("bundlerName", b.name),
+				abstractlogger.Any("errors", b.buildResult.Errors),
+			)
+			return
+		}
+		b.log.Debug("Build successful", abstractlogger.String("bundlerName", b.name))
 	} else {
-		b.log.Debug("Initial build successful", abstractlogger.String("bundlerName", b.name))
-		b.BuildDoneChan <- struct{}{}
+		buildResult := b.initialBuild()
+		b.buildResult = &buildResult
+		if len(b.buildResult.Errors) != 0 {
+			b.log.Fatal("Initial Build failed",
+				abstractlogger.String("bundlerName", b.name),
+				abstractlogger.Any("errors", b.buildResult.Errors),
+			)
+			return
+		}
+		b.log.Debug("Initial Build successful", abstractlogger.String("bundlerName", b.name))
 	}
+	if b.onAfterBundle != nil {
+		b.onAfterBundle()
+	}
+}
+
+func (b *Bundler) Watch(ctx context.Context) {
+	if len(b.watchPaths) == 0 {
+		return
+	}
+	if b.buildResult.Rebuild == nil {
+		return
+	}
+	if len(b.watchPaths) > 0 {
+		b.log.Debug("Watching for file changes",
+			abstractlogger.String("bundlerName", b.name),
+			abstractlogger.String("outFile", b.outFile),
+			abstractlogger.Strings("externalImports", b.externalImports),
+			abstractlogger.Strings("watchPaths", b.watchPaths),
+			abstractlogger.Strings("fileLoaders", b.fileLoaders),
+		)
+		b.watch(ctx, b.buildResult.Rebuild)
+	}
+}
+
+func (b *Bundler) BundleAndWatch(ctx context.Context) {
+	b.Bundle()
 	if len(b.watchPaths) > 0 {
 		b.log.Debug("Watching for file changes",
 			abstractlogger.String("bundlerName", b.name),
@@ -74,17 +118,18 @@ func (b *Bundler) Bundle(ctx context.Context) {
 			abstractlogger.Strings("externalImports", b.externalImports),
 			abstractlogger.Strings("fileLoaders", b.fileLoaders),
 		)
-		b.watch(ctx, result.Rebuild)
+		b.watch(ctx, b.buildResult.Rebuild)
 	}
 }
 
 func (b *Bundler) initialBuild() api.BuildResult {
 	options := api.BuildOptions{
-		Outfile:     b.outFile,
-		EntryPoints: []string{b.entryPoint},
-		Bundle:      true,
-		Incremental: true,
-		Platform:    api.PlatformNode,
+		Outfile:       b.outFile,
+		EntryPoints:   []string{b.entryPoint},
+		Bundle:        true,
+		Incremental:   true,
+		Platform:      api.PlatformNode,
+		AbsWorkingDir: b.absWorkingDir,
 		Loader: map[string]api.Loader{
 			".json": api.LoaderJSON,
 		},
@@ -92,7 +137,8 @@ func (b *Bundler) initialBuild() api.BuildResult {
 		Color:    api.ColorAlways,
 		External: append(b.externalImports, "./node_modules/*"),
 		Engines: []api.Engine{
-			{Name: api.EngineNode, Version: "12"}, // Maintenance
+			// https://nodejs.org/en/about/releases/
+			{Name: api.EngineNode, Version: "14"}, // Maintenance
 			{Name: api.EngineNode, Version: "16"}, // LTS
 		},
 		Write:       true,
@@ -177,11 +223,12 @@ func (b *Bundler) watch(ctx context.Context, rebuild func() api.BuildResult) {
 	}, b.log)
 
 	go func() {
-		defer close(b.BuildDoneChan)
 		err := w.Watch(ctx, func(paths []string) error {
 			result := rebuild()
 			if len(result.Errors) == 0 {
-				b.BuildDoneChan <- struct{}{}
+				if b.onAfterBundle != nil {
+					b.onAfterBundle()
+				}
 			} else {
 				for _, message := range result.Errors {
 					b.log.Error("Bundler build error",

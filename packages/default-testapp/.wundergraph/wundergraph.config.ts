@@ -3,7 +3,6 @@ import {
 	authProviders,
 	configureWunderGraphApplication,
 	cors,
-	EnvironmentVariable,
 	introspect,
 	templates,
 } from '@wundergraph/sdk';
@@ -21,6 +20,7 @@ const jsp = introspect.openApi({
 		kind: 'file',
 		filePath: '../json_placeholder.json',
 	},
+	headers: (builder) => builder.addClientRequestHeader('X-Authorization', 'Authorization'),
 });
 
 const countries = introspect.graphql({
@@ -28,9 +28,14 @@ const countries = introspect.graphql({
 	url: 'https://countries.trevorblades.com/',
 });
 
+const weather = introspect.graphql({
+	apiNamespace: 'weather',
+	url: 'https://graphql-weather-api.herokuapp.com/',
+});
+
 const myApplication = new Application({
 	name: 'app',
-	apis: [spaceX, countries, jsp],
+	apis: [spaceX, jsp, weather, countries],
 });
 
 // configureWunderGraph emits the configuration
@@ -38,6 +43,9 @@ configureWunderGraphApplication({
 	application: myApplication,
 	server,
 	operations,
+	authorization: {
+		roles: ['admin', 'user'],
+	},
 	codeGenerators: [
 		{
 			templates: [

@@ -1,6 +1,6 @@
 import { GraphQLEnumType, GraphQLList, GraphQLNonNull, GraphQLObjectType, GraphQLSchema, GraphQLString } from 'graphql';
 import { configureWunderGraphServer } from '@wundergraph/sdk';
-import type { AuthenticationResponse, HooksConfig } from './generated/wundergraph.hooks';
+import type { HooksConfig } from './generated/wundergraph.hooks';
 import type { InternalClient } from './generated/wundergraph.internal.client';
 
 const testEnum = new GraphQLEnumType({
@@ -18,26 +18,33 @@ const testEnum = new GraphQLEnumType({
 export default configureWunderGraphServer<HooksConfig, InternalClient>(() => ({
 	hooks: {
 		authentication: {
-			async revalidate(): Promise<AuthenticationResponse> {
+			mutatingPostAuthentication: async (hook) => {
 				return {
 					status: 'ok',
 					user: {
-						name: 'test',
-					},
-				};
-			},
-
-			async postAuthentication(hook) {},
-			async mutatingPostAuthentication(hook): Promise<AuthenticationResponse> {
-				return {
-					status: 'ok',
-					user: {
-						name: 'test',
+						...hook.user,
+						roles: ['user', 'admin'],
 					},
 				};
 			},
 		},
 		queries: {
+			Hello: {
+				preResolve: async (hook) => {
+					console.log('###preResolve', hook);
+				},
+				mutatingPreResolve: async (hook) => {
+					console.log('###mutatingPreResolve', hook);
+					return hook.input;
+				},
+				postResolve: async (hook) => {
+					console.log('###postResolve', hook);
+				},
+				mutatingPostResolve: async (hook) => {
+					console.log('###mutatingPostResolve', hook);
+					return hook.response;
+				},
+			},
 			FakeWeather: {
 				mockResolve: async (hook) => {
 					return {
@@ -57,7 +64,24 @@ export default configureWunderGraphServer<HooksConfig, InternalClient>(() => ({
 				},
 			},
 		},
-		mutations: {},
+		mutations: {
+			SetName: {
+				preResolve: async (hook) => {
+					console.log('###preResolve', hook);
+				},
+				mutatingPreResolve: async (hook) => {
+					console.log('###mutatingPreResolve', hook);
+					return hook.input;
+				},
+				postResolve: async (hook) => {
+					console.log('###postResolve', hook);
+				},
+				mutatingPostResolve: async (hook) => {
+					console.log('###mutatingPostResolve', hook);
+					return hook.response;
+				},
+			},
+		},
 	},
 	graphqlServers: [
 		{
@@ -65,12 +89,17 @@ export default configureWunderGraphServer<HooksConfig, InternalClient>(() => ({
 			serverName: 'gql',
 			schema: new GraphQLSchema({
 				query: new GraphQLObjectType({
-					name: 'RootQueryType',
+					name: 'Query',
 					fields: {
 						hello: {
 							type: GraphQLString,
-							resolve() {
-								return 'world';
+							args: {
+								name: {
+									type: new GraphQLNonNull(GraphQLString),
+								},
+							},
+							resolve(root, args) {
+								return args.name + 'world';
 							},
 						},
 						testField: {

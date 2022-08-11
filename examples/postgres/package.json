@@ -1,5 +1,5 @@
 {
-  "name": "wundergraph-example-postgresql",
+  "name": "wundergraph-postgresql",
   "version": "1.0.0",
   "description": "",
   "scripts": {
@@ -7,12 +7,12 @@
     "start:services": "docker-compose up -d",
     "start:api": "cd .wundergraph && wunderctl up --debug",
     "cleanup": "docker-compose down -v",
-    "check": "tsc"
+    "check": "tsc --noEmit"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@wundergraph/sdk": "^0.93.1",
+    "@wundergraph/sdk": "^0.96.1",
     "graphql": "^16.3.0"
   },
   "devDependencies": {
