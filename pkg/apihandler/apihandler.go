@@ -775,11 +775,15 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			shared.Ctx.Context, closeFunc = context.WithCancel(shared.Ctx.Context)
 			flushWriter.close = closeFunc
 		}
-
+		SendSSEPingMessage(*flushWriter, shared.Ctx.Context)
 		err := h.resolver.ResolveGraphQLSubscription(shared.Ctx, p.Response, flushWriter)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
+			}
+			_, errWriter := flushWriter.Write([]byte("error: " + err.Error()))
+			if errWriter != nil {
+				h.log.Error("respond to client", abstractlogger.Error(errWriter))
 			}
 			h.log.Error("ResolveGraphQLSubscription", abstractlogger.Error(err))
 			return
