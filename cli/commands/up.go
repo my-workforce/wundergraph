@@ -120,7 +120,7 @@ var upCmd = &cobra.Command{
 
 		var hookServerRunner *scriptrunner.ScriptRunner
 		var webhooksBundler *bundler.Bundler
-		var onAfterBuild func()
+		var onAfterBuild func() error
 
 		if entryPoints.ServerEntryPointAbs != "" {
 			hooksBundler := bundler.NewBundler(bundler.Config{
@@ -129,7 +129,9 @@ var upCmd = &cobra.Command{
 				AbsWorkingDir: entryPoints.WunderGraphDirAbs,
 				OutFile:       serverOutFile,
 				Logger:        log,
-				WatchPaths:    []string{configJsonPath},
+				WatchPaths: []*watcher.WatchPath{
+					{Path: configJsonPath},
+				},
 			})
 
 			if files.DirectoryExists(webhooksDir) {
@@ -144,8 +146,9 @@ var upCmd = &cobra.Command{
 					AbsWorkingDir: entryPoints.WunderGraphDirAbs,
 					OutDir:        webhooksOutDir,
 					Logger:        log,
-					OnAfterBundle: func() {
+					OnAfterBundle: func() error {
 						log.Debug("Webhooks bundled!", abstractlogger.String("bundlerName", "webhooks-bundler"))
+						return nil
 					},
 				})
 			}
@@ -171,7 +174,7 @@ var upCmd = &cobra.Command{
 				ScriptEnv:     append(os.Environ(), hooksEnv...),
 			})
 
-			onAfterBuild = func() {
+			onAfterBuild = func() error {
 				log.Debug("Config built!", abstractlogger.String("bundlerName", "config-bundler"))
 
 				// generate new config
@@ -205,10 +208,12 @@ var upCmd = &cobra.Command{
 					// run or restart the introspection poller
 					<-configIntrospectionRunner.Run(ctx)
 				}()
+
+				return nil
 			}
 		} else {
 			_, _ = white.Printf("Hooks EntryPoint not found, skipping. File: %s\n", serverEntryPointFilename)
-			onAfterBuild = func() {
+			onAfterBuild = func() error {
 				log.Debug("Config built!", abstractlogger.String("bundlerName", "config-bundler"))
 
 				// generate new config
@@ -218,6 +223,8 @@ var upCmd = &cobra.Command{
 					// run or restart the introspection poller
 					<-configIntrospectionRunner.Run(ctx)
 				}()
+
+				return nil
 			}
 		}
 
@@ -227,15 +234,15 @@ var upCmd = &cobra.Command{
 			AbsWorkingDir: entryPoints.WunderGraphDirAbs,
 			OutFile:       configOutFile,
 			Logger:        log,
-			WatchPaths: []string{
-				path.Join(entryPoints.WunderGraphDirAbs, "operations"),
-				path.Join(entryPoints.WunderGraphDirAbs, "fragments"),
+			WatchPaths: []*watcher.WatchPath{
+				{Path: path.Join(entryPoints.WunderGraphDirAbs, "operations"), Optional: true},
+				{Path: path.Join(entryPoints.WunderGraphDirAbs, "fragments"), Optional: true},
 				// all webhook filenames are stored in the config
 				// we are going to create HTTP routes on the node for all of them
-				webhooksDir,
+				{Path: webhooksDir, Optional: true},
 				// a new cache entry is generated as soon as the introspection "poller" detects a change in the API dependencies
 				// in that case we want to rerun the script to build a new config
-				introspectionCacheDir,
+				{Path: introspectionCacheDir},
 			},
 			IgnorePaths: []string{
 				"node_modules",
@@ -243,15 +250,15 @@ var upCmd = &cobra.Command{
 			OnAfterBundle: onAfterBuild,
 		})
 
-		configBundler.Bundle()
+		_ = configBundler.Bundle()
 
 		// only start watching in the builder once the initial config was built and written to the filesystem
 		go configBundler.Watch(ctx)
 
 		configFileChangeChan := make(chan struct{})
 		configWatcher := watcher.NewWatcher("config", &watcher.Config{
-			WatchPaths: []string{
-				configJsonPath,
+			WatchPaths: []*watcher.WatchPath{
+				{Path: configJsonPath},
 			},
 		}, log)
 
