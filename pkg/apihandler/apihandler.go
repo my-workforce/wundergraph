@@ -783,10 +783,6 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			_, errWriter := flushWriter.Write([]byte("error: " + err.Error()))
-			if errWriter != nil {
-				h.log.Error("respond to client", abstractlogger.Error(errWriter))
-			}
 			h.log.Error("ResolveGraphQLSubscription", abstractlogger.Error(err))
 			return
 		}
