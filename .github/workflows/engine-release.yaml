@@ -55,15 +55,13 @@ jobs:
         run: make codegen-go
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v3
+        uses: goreleaser/goreleaser-action@v2
         with:
           version: latest
           workdir: './cmd/wunderctl'
-          distribution: goreleaser-pro
           args: release --rm-dist --config ./../../.github/goreleaser/.goreleaser-linux.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
           AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
           GH_AUTH_DEMO_CLIENT_ID: ${{ secrets.GH_AUTH_DEMO_CLIENT_ID }}
           GH_AUTH_DEMO_CLIENT_SECRET: ${{ secrets.GH_AUTH_DEMO_CLIENT_SECRET }}
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
