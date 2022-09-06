@@ -57,13 +57,13 @@ jobs:
       - uses: ./.github/actions/node
         with:
           working-directory: ${{ env.WORKING_DIRECTORY }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GIT_TOKEN }}
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v1
         with:
           version: '3.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GIT_TOKEN }}
 
       - run: make bootstrap-minio
 

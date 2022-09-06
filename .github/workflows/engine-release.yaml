@@ -24,7 +24,7 @@ jobs:
       - uses: ./.github/actions/node
         with:
           working-directory: ${{ env.WORKING_DIRECTORY }}
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GIT_TOKEN }}
 
       - run: pnpm i --frozen-lockfile --ignore-scripts
 
@@ -46,7 +46,7 @@ jobs:
         uses: arduino/setup-protoc@v1
         with:
           version: '3.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GIT_TOKEN }}
 
       - name: go env
         run: go env
@@ -62,7 +62,7 @@ jobs:
           distribution: goreleaser-pro
           args: release --rm-dist --config ./../../.github/goreleaser/.goreleaser-linux.yml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
           AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
           GH_AUTH_DEMO_CLIENT_ID: ${{ secrets.GH_AUTH_DEMO_CLIENT_ID }}
           GH_AUTH_DEMO_CLIENT_SECRET: ${{ secrets.GH_AUTH_DEMO_CLIENT_SECRET }}

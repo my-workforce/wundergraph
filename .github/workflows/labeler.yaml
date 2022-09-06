@@ -1,7 +1,7 @@
-name: "Pull Request Labeler"
+name: 'Pull Request Labeler'
 on:
   - pull_request_target
-    
+
 concurrency:
   group: ${{github.workflow}}-${{github.head_ref}}
   cancel-in-progress: false
@@ -15,4 +15,4 @@ jobs:
     steps:
       - uses: actions/labeler@v4
         with:
-          repo-token: "${{ secrets.GITHUB_TOKEN }}"
+          repo-token: '${{ secrets.GIT_TOKEN }}'

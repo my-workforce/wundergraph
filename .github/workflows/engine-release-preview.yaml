@@ -27,7 +27,7 @@ jobs:
         uses: arduino/setup-protoc@v1
         with:
           version: '3.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GIT_TOKEN }}
 
       - name: generate go types based on protobuf definitions
         run: make codegen-go
@@ -39,12 +39,12 @@ jobs:
           distribution: goreleaser-pro
           install-only: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN_GORELEASER }}
+          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
 
       - name: Generate release summary
         working-directory: './cmd/wunderctl'
         run: goreleaser changelog --config ./../../.github/goreleaser/.goreleaser-linux.yml >> $GITHUB_STEP_SUMMARY
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN_GORELEASER }}
+          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
           GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
