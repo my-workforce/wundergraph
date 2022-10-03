@@ -122,7 +122,7 @@ func (a *Authenticator) Login() string {
 	}
 
 	wgClient := v2wundergraphapi.New(token.AccessToken, viper.GetString("API_URL"), &http.Client{
-		Timeout: time.Second * 10,
+		Timeout: time.Second * 120,
 	}, a.log)
 
 	err = wgClient.RegisterCliUserWithAccessToken()
@@ -189,7 +189,7 @@ func (a *Authenticator) refreshJWT(refreshToken string) (string, error) {
 	var result = &JWTRefreshResponse{}
 
 	client := http.Client{}
-	client.Timeout = time.Second * 10
+	client.Timeout = time.Second * 120
 
 	resp, err := http.PostForm(a.authBaseUrl+"/protocol/openid-connect/token", url.Values{
 		"client_id":     {a.clientID},

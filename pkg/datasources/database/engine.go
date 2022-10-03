@@ -28,7 +28,7 @@ func InstallPrismaDependencies(log abstractlogger.Logger, wundergraphDir string)
 		log:            log,
 		wundergraphDir: wundergraphDir,
 		client: &http.Client{
-			Timeout: time.Second * 10,
+			Timeout: time.Second * 120,
 		},
 	}
 	return engine.ensurePrisma()

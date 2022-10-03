@@ -611,7 +611,7 @@ func NewLoadUserMw(config LoadUserConfig) func(handler http.Handler) http.Handle
 		s:               config.Cookie,
 		cache:           cache,
 		client: &http.Client{
-			Timeout: time.Second * 10,
+			Timeout: time.Second * 120,
 		},
 		hooks: config.Hooks,
 	}
@@ -771,7 +771,7 @@ func (u *UserLogoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req.URL.RawQuery = q.Encode()
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	client := &http.Client{
-		Timeout: time.Second * 10,
+		Timeout: time.Second * 120,
 	}
 	res, err := client.Do(req)
 	if err != nil || res.StatusCode != http.StatusOK {

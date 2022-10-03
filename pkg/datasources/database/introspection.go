@@ -14,7 +14,7 @@ import (
 func IntrospectPrismaDatabase(introspectionSchema string, log abstractlogger.Logger) (prismaSchema, graphqlSDL, dmmf string, err error) {
 	engine := NewEngine(
 		&http.Client{
-			Timeout: time.Second * 10,
+			Timeout: time.Second * 120,
 		},
 		log,
 	)

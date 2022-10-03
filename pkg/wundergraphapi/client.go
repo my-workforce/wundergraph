@@ -25,7 +25,7 @@ func New(accessToken, baseURL string, log abstractlogger.Logger) *Client {
 	return &Client{
 		accessToken: accessToken,
 		client: &http.Client{
-			Timeout: time.Second * 10,
+			Timeout: time.Second * 120,
 		},
 		baseURL: baseURL,
 		log:     log,

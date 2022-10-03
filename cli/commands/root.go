@@ -109,7 +109,7 @@ func InitWunderGraphApiClient() *v2wundergraphapi.Client {
 
 func InitWunderGraphApiClientWithToken(token string) *v2wundergraphapi.Client {
 	return v2wundergraphapi.New(token, viper.GetString("API_URL"), &http.Client{
-		Timeout: time.Second * 10,
+		Timeout: time.Second * 120,
 	}, log)
 }
 

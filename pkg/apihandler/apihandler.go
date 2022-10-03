@@ -1898,7 +1898,7 @@ func (r *Builder) configureOpenIDConnectIssuerLogoutURLs() map[string]string {
 	issuerLogoutURLs := map[string]string{}
 
 	client := &http.Client{
-		Timeout: time.Second * 10,
+		Timeout: time.Second * 120,
 	}
 
 	for _, provider := range r.api.AuthenticationConfig.CookieBased.Providers {

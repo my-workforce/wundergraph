@@ -46,8 +46,8 @@ func New(ctx context.Context, info BuildInfo, cfg *wundernodeconfig.Config, log 
 		pool:     pool.New(),
 		log:      log,
 		apiClient: &fasthttp.Client{
-			ReadTimeout:              time.Second * 10,
-			WriteTimeout:             time.Second * 10,
+			ReadTimeout:              time.Second * 120,
+			WriteTimeout:             time.Second * 120,
 			MaxIdleConnDuration:      time.Minute * 5,
 			MaxConnDuration:          time.Minute * 10,
 			MaxConnsPerHost:          100,
@@ -332,7 +332,7 @@ func (n *Node) startServer(nodeConfig wgpb.WunderNodeConfig) error {
 		}
 
 		dialer := &net.Dialer{
-			Timeout:   10 * time.Second,
+			Timeout:   120 * time.Second,
 			KeepAlive: 90 * time.Second,
 		}
 
@@ -343,7 +343,7 @@ func (n *Node) startServer(nodeConfig wgpb.WunderNodeConfig) error {
 			ForceAttemptHTTP2:   true,
 			MaxIdleConns:        1024,
 			IdleConnTimeout:     90 * time.Second,
-			TLSHandshakeTimeout: 10 * time.Second,
+			TLSHandshakeTimeout: 120 * time.Second,
 		}
 
 		hooksClient := hooks.NewClient(api.HooksServerURL, n.log)

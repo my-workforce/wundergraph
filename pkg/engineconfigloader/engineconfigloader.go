@@ -44,7 +44,7 @@ type DefaultFactoryResolver struct {
 
 func NewDefaultFactoryResolver(transportFactory ApiTransportFactory, baseTransport http.RoundTripper, debug bool, log abstractlogger.Logger) *DefaultFactoryResolver {
 	defaultHttpClient := &http.Client{
-		Timeout:   time.Second * 10,
+		Timeout:   time.Second * 120,
 		Transport: transportFactory(baseTransport),
 	}
 	return &DefaultFactoryResolver{
@@ -82,7 +82,7 @@ func (d *DefaultFactoryResolver) tryCreateHTTPSClient(mTLS *wgpb.MTLSConfigurati
 	}
 
 	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
+		Timeout:   120 * time.Second,
 		KeepAlive: 90 * time.Second,
 	}
 
@@ -97,7 +97,7 @@ func (d *DefaultFactoryResolver) tryCreateHTTPSClient(mTLS *wgpb.MTLSConfigurati
 		},
 		MaxIdleConns:        1024,
 		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
+		TLSHandshakeTimeout: 120 * time.Second,
 		TLSClientConfig: &tls.Config{
 			Certificates:       []tls.Certificate{cert},
 			RootCAs:            caCertPool,
@@ -108,7 +108,7 @@ func (d *DefaultFactoryResolver) tryCreateHTTPSClient(mTLS *wgpb.MTLSConfigurati
 	baseTransportWithMTLS := d.transportFactory(mtlsTransport)
 
 	return &http.Client{
-		Timeout:   time.Second * 10,
+		Timeout:   time.Second * 120,
 		Transport: baseTransportWithMTLS,
 	}, nil
 

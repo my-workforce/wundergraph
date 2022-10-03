@@ -27,7 +27,7 @@ func main() {
 	srv := handler.New(inventory.NewExecutableSchema(inventory.Config{Resolvers: &inventory.Resolver{}}))
 	srv.AddTransport(transport.POST{})
 	srv.AddTransport(transport.Websocket{
-		KeepAlivePingInterval: 10 * time.Second,
+		KeepAlivePingInterval: 120 * time.Second,
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
