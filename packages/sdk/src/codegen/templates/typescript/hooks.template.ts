@@ -1,11 +1,9 @@
 //language=handlebars
 export const template = `
 import { {{ modelImports }} } from "./models"
-import type { BaseRequestContext, AuthenticationRequestContext, WunderGraphRequest, WunderGraphResponse, AuthenticationResponse } from "@wundergraph/sdk";
+import type { BaseRequestContext, WunderGraphRequest, WunderGraphResponse, AuthenticationResponse, AuthenticationHookRequest, HooksConfiguration, WsTransportOnConnectionInitResponse } from "@wundergraph/sdk";
 import type { InternalClient } from "./wundergraph.internal.client"
 import type { User } from "./wundergraph.server"
-
-export type AuthenticationHookRequest = BaseRequestContext<User, InternalClient> & AuthenticationRequestContext<User>
 
 // use SKIP to skip the hook and continue the request / response chain without modifying the request / response
 export type SKIP = "skip";
@@ -15,6 +13,8 @@ export type SKIP = "skip";
 export type CANCEL = "cancel";
 
 export type WUNDERGRAPH_OPERATION = {{{operationNamesUnion}}};
+
+export type DATA_SOURCES = {{{dataSourcesUnion}}};
 
 export interface HttpTransportHookRequest extends BaseRequestContext<User, InternalClient> {
 		request: WunderGraphRequest;
@@ -29,6 +29,9 @@ export interface HttpTransportHookRequestWithResponse extends BaseRequestContext
         name: string;
         type: string;
     }
+}
+export interface WsTransportHookRequest extends BaseRequestContext<User, InternalClient> {
+		request: WunderGraphRequest;
 }
 export interface GlobalHooksConfig {
     httpTransport?: {
@@ -56,6 +59,25 @@ export interface GlobalHooksConfig {
             // enableForAllOperations will disregard the enableForOperations property and enable the hook for all operations
             enableForAllOperations?: boolean;
         };
+    },
+    wsTransport?: {
+        // onConnectionInit is used to populate 'connection_init' message payload with custom data
+        // it can be used to authenticate the websocket connection
+        onConnectionInit?: {
+            hook: (hook: WsTransportHookRequest) => Promise<WsTransportOnConnectionInitResponse>;
+            /**
+             * enableForDataSources will enable the hook for specific data sources.
+             * you should provide a list of data sources ids
+             * an id is the identifier of the data source in the wundergraph.config.ts file 
+             * @example
+             *const chat = introspect.graphql({             
+             *	id: 'chatId',
+						 *	apiNamespace: 'chat',
+						 *	url: 'http://localhost:8085/query',
+						 *});
+             */
+       	    enableForDataSources: DATA_SOURCES[]; 
+        }
     }
 }
         
@@ -78,45 +100,49 @@ export interface HookRequestWithInput<Input> extends HookRequest {
 		input: Input; 
 }
 						
-export interface HooksConfig {
+export interface HooksConfig extends HooksConfiguration<Queries, Mutations, User, InternalClient> {
     global?: GlobalHooksConfig;
     authentication?: {
-        postAuthentication?: (hook: AuthenticationHookRequest) => Promise<void>;
-        mutatingPostAuthentication?: (hook: AuthenticationHookRequest) => Promise<AuthenticationResponse<User>>;
-        revalidate?: (hook: AuthenticationHookRequest) => Promise<AuthenticationResponse<User>>;
+        postAuthentication?: (hook: AuthenticationHookRequest<User, InternalClient>) => Promise<void>;
+        mutatingPostAuthentication?: (hook: AuthenticationHookRequest<User, InternalClient>) => Promise<AuthenticationResponse<User>>;
+        revalidate?: (hook: AuthenticationHookRequest<User, InternalClient>) => Promise<AuthenticationResponse<User>>;
+        postLogout?: (hook: AuthenticationHookRequest<User, InternalClient>) => Promise<void>;
     };
+		{{#if hasQueries}}
+				queries?: Queries,
+		{{/if}}
+		{{#if hasMutations}}
+				mutations?: Mutations
+		{{/if}}
+}
+
+export interface Queries {
 {{#if hasQueries}}
-    queries?: {
     {{#each queries}}
         {{operationName}}?: {
-						mockResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<{{operationName}}Response>;
-            preResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<void>;
-        		{{#if hasInternalInput}} mutatingPreResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<Injected{{operationName}}Input>;{{/if}}
-            postResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}} & HookRequestWithResponse<{{operationName}}Response>) => Promise<void>;
-            customResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<void | {{operationName}}Response>;
-            mutatingPostResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}} & HookRequestWithResponse<{{operationName}}Response>) => Promise<{{operationName}}Response>;
+        mockResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<{{operationName}}Response>;
+        preResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<void>;
+        {{#if hasInternalInput}} mutatingPreResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<Injected{{operationName}}Input>;{{/if}}
+        postResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}} & HookRequestWithResponse<{{operationName}}Response>) => Promise<void>;
+        customResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<void | {{operationName}}Response>;
+        mutatingPostResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}} & HookRequestWithResponse<{{operationName}}Response>) => Promise<{{operationName}}Response>;
         }
     {{/each}}
-    };
-{{else}}
-    queries?: {};
 {{/if}}
+}
 
+export interface Mutations {
 {{#if hasMutations}}
-    mutations?: {
-        {{#each mutations}}
-            {{operationName}}?: {
-								mockResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<{{operationName}}Response>;
-								preResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<void>;
-								{{#if hasInternalInput}} mutatingPreResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<Injected{{operationName}}Input>;{{/if}}
-								postResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}} & HookRequestWithResponse<{{operationName}}Response>) => Promise<void>;
-								customResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<void | {{operationName}}Response>;
-								mutatingPostResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}} & HookRequestWithResponse<{{operationName}}Response>) => Promise<{{operationName}}Response>;
-            }
-        {{/each}}
-    };
-{{else}}
-    mutations?: {};
+    {{#each mutations}}
+        {{operationName}}?: {
+        mockResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<{{operationName}}Response>;
+        preResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<void>;
+        {{#if hasInternalInput}} mutatingPreResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<Injected{{operationName}}Input>;{{/if}}
+        postResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}} & HookRequestWithResponse<{{operationName}}Response>) => Promise<void>;
+        customResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}}) => Promise<void | {{operationName}}Response>;
+        mutatingPostResolve?: (hook: {{#if hasInternalInput}}HookRequestWithInput<Injected{{operationName}}Input>{{else}}HookRequest{{/if}} & HookRequestWithResponse<{{operationName}}Response>) => Promise<{{operationName}}Response>;
+        }
+    {{/each}}
 {{/if}}
 }
 `;

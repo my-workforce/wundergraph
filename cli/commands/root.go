@@ -1,41 +1,50 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/spf13/viper"
-	"github.com/wundergraph/wundergraph/pkg/cli/auth"
-	"github.com/wundergraph/wundergraph/pkg/config"
-	"github.com/wundergraph/wundergraph/pkg/files"
-	"github.com/wundergraph/wundergraph/pkg/manifest"
-
 	"github.com/jensneuse/abstractlogger"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
-	"github.com/wundergraph/wundergraph/pkg/v2wundergraphapi"
+	"github.com/spf13/viper"
+	"go.uber.org/zap"
 
+	"github.com/wundergraph/wundergraph/cli/helpers"
+	"github.com/wundergraph/wundergraph/pkg/cli/auth"
+	"github.com/wundergraph/wundergraph/pkg/config"
+	"github.com/wundergraph/wundergraph/pkg/files"
 	"github.com/wundergraph/wundergraph/pkg/logging"
+	"github.com/wundergraph/wundergraph/pkg/manifest"
 	"github.com/wundergraph/wundergraph/pkg/node"
+	"github.com/wundergraph/wundergraph/pkg/v2wundergraphapi"
+)
+
+const (
+	configJsonFilename       = "wundergraph.config.json"
+	configEntryPointFilename = "wundergraph.config.ts"
+	serverEntryPointFilename = "wundergraph.server.ts"
+
+	defaultNodeGracefulTimeoutSeconds = 10
 )
 
 var (
-	BuildInfo          node.BuildInfo
-	GitHubAuthDemo     node.GitHubAuthDemo
-	logLevel           string
-	DotEnvFile         string
-	log                abstractlogger.Logger
-	enableDebugMode    bool
-	jsonEncodedLogging bool
-	serviceToken       string
-	wundergraphDir     string
+	BuildInfo             node.BuildInfo
+	GitHubAuthDemo        node.GitHubAuthDemo
+	DotEnvFile            string
+	log                   abstractlogger.Logger
+	serviceToken          string
+	_wunderGraphDirConfig string
+	disableCache          bool
+	clearCache            bool
 
-	configEntryPointFilename string
-	serverEntryPointFilename string
+	rootFlags helpers.RootFlags
 
 	red    = color.New(color.FgHiRed)
 	green  = color.New(color.FgHiGreen)
@@ -56,35 +65,63 @@ Simply running "wunderctl" will check the wundergraph.manifest.json in the curre
 wunderctl is gathering anonymous usage data so that we can better understand how it's being used and improve it.
 You can opt out of this by setting the following environment variable: WUNDERGRAPH_DISABLE_METRICS
 `,
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		if enableDebugMode {
-			log = buildLogger(abstractlogger.DebugLevel)
-		} else {
-			log = buildLogger(findLogLevel(abstractlogger.ErrorLevel))
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		switch cmd.Name() {
+		case "loadoperations":
+			// skip any setup for loadoperations to avoid logging anything
+			// as sdk uses stdout for the generated operations list
+			// TODO: migrate to writing it to a file
+			return nil
 		}
 
-		err := godotenv.Load(DotEnvFile)
+		logging.Init(rootFlags.PrettyLogs, rootFlags.DebugMode)
+
+		if rootFlags.DebugMode {
+			// override log level to debug
+			rootFlags.CliLogLevel = "debug"
+		}
+
+		logLevel, err := logging.FindLogLevel(rootFlags.CliLogLevel)
+		if err != nil {
+			return err
+		}
+		zapLog := logging.Zap().With(zap.String("component", "@wundergraph/wunderctl"))
+		log = abstractlogger.NewZapLogger(zapLog, logLevel)
+
+		err = godotenv.Load(DotEnvFile)
 		if err != nil {
 			if _, ok := err.(*fs.PathError); ok {
 				log.Debug("starting without env file")
-				return
+			} else {
+				log.Fatal("error loading env file",
+					abstractlogger.Error(err))
 			}
-			log.Fatal("error loading env file",
-				abstractlogger.Error(err),
-			)
 		} else {
 			log.Debug("env file successfully loaded",
 				abstractlogger.String("file", DotEnvFile),
 			)
 		}
+
+		if clearCache {
+			wunderGraphDir, err := files.FindWunderGraphDir(_wunderGraphDirConfig)
+			if err != nil {
+				return err
+			}
+			cacheDir := filepath.Join(wunderGraphDir, "cache")
+			if err := os.RemoveAll(cacheDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+
+		return nil
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		wgDir, err := files.FindWunderGraphDir(wundergraphDir)
+		client := InitWunderGraphApiClient()
+		wunderGraphDir, err := files.FindWunderGraphDir(_wunderGraphDirConfig)
 		if err != nil {
 			return err
 		}
-		client := InitWunderGraphApiClient()
-		man := manifest.New(log, client, wgDir)
+		man := manifest.New(log, client, wunderGraphDir)
 		err = man.Load()
 		if err != nil {
 			return fmt.Errorf("unable to load wundergraph.manifest.json")
@@ -135,34 +172,13 @@ func init() {
 	viper.SetDefault("OAUTH_BASE_URL", "https://accounts.wundergraph.com/auth/realms/master")
 	viper.SetDefault("API_URL", "https://api.wundergraph.com")
 
-	log = buildLogger(findLogLevel(abstractlogger.ErrorLevel))
-
-	rootCmd.PersistentFlags().StringVarP(&logLevel, "loglevel", "l", "info", "sets the log level")
+	rootCmd.PersistentFlags().StringVarP(&rootFlags.CliLogLevel, "cli-log-level", "l", "info", "sets the CLI log level")
 	rootCmd.PersistentFlags().StringVarP(&DotEnvFile, "env", "e", ".env", "allows you to set environment variables from an env file")
-	rootCmd.PersistentFlags().BoolVar(&enableDebugMode, "debug", false, "enables the debug mode so that all requests and responses will be logged")
-	rootCmd.PersistentFlags().BoolVar(&jsonEncodedLogging, "json-encoded-logging", false, "switches the logging to json encoded logging")
-	rootCmd.PersistentFlags().StringVar(&wundergraphDir, "wundergraph-dir", files.WunderGraphDirName, "path to your .wundergraph directory")
-}
-
-func buildLogger(level abstractlogger.Level) abstractlogger.Logger {
-	return logging.New(level, jsonEncodedLogging)
-}
-
-func findLogLevel(defaultLevel abstractlogger.Level) abstractlogger.Level {
-	switch logLevel {
-	case "debug":
-		return abstractlogger.DebugLevel
-	case "warn":
-		return abstractlogger.WarnLevel
-	case "error":
-		return abstractlogger.ErrorLevel
-	case "fatal":
-		return abstractlogger.FatalLevel
-	case "panic":
-		return abstractlogger.PanicLevel
-	default:
-		return defaultLevel
-	}
+	rootCmd.PersistentFlags().BoolVar(&rootFlags.DebugMode, "debug", false, "enables the debug mode so that all requests and responses will be logged")
+	rootCmd.PersistentFlags().BoolVar(&rootFlags.PrettyLogs, "pretty-logging", false, "switches the logging to human readable format")
+	rootCmd.PersistentFlags().StringVar(&_wunderGraphDirConfig, "wundergraph-dir", files.WunderGraphDirName, "path to your .wundergraph directory")
+	rootCmd.PersistentFlags().BoolVar(&disableCache, "no-cache", false, "disables local caches")
+	rootCmd.PersistentFlags().BoolVar(&clearCache, "clear-cache", false, "clears local caches during startup")
 }
 
 func authenticator() *auth.Authenticator {

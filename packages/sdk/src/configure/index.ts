@@ -4,11 +4,11 @@ import {
 	Application,
 	DatabaseApiCustom,
 	DataSource,
-	WG_DATA_SOURCE_POLLING_MODE,
 	GraphQLApiCustom,
 	introspectGraphqlServer,
 	RESTApiCustom,
 	StaticApiCustom,
+	WG_DATA_SOURCE_POLLING_MODE,
 } from '../definition';
 import { mergeApis, removeBaseSchema } from '../definition/merge';
 import { generateDotGraphQLConfig } from '../dotgraphqlconfig';
@@ -52,50 +52,25 @@ import _ from 'lodash';
 import { wunderctlExec } from '../wunderctlexec';
 import colors from 'colors';
 import { CustomizeMutation, CustomizeQuery, CustomizeSubscription, OperationsConfiguration } from './operations';
-import { WunderGraphHooksAndServerConfig, WunderGraphServerConfig } from '../middleware/types';
-import { listenAddr } from '../env';
+import {
+	AuthenticationHookRequest,
+	AuthenticationResponse,
+	WunderGraphHooksAndServerConfig,
+	WunderGraphUser,
+} from '../middleware/types';
 import { getWebhooks } from '../webhooks';
 import process from 'node:process';
-
-export class EnvironmentVariable {
-	constructor(name: string, defaultValue?: string) {
-		this.name = name;
-		this.defaultValue = defaultValue;
-	}
-
-	public name: string;
-	public defaultValue?: string;
-}
-
-export class PlaceHolder {
-	constructor(name: string) {
-		this.name = name;
-	}
-
-	public name: string;
-	public readonly _identifier = 'placeholder';
-}
-
-export type InputVariable = string | EnvironmentVariable | PlaceHolder;
-
-/**
- * resolveVariable resolves a variable to a string. Whereby it can fetch the value from an environment variable,
- * or from a placeholder. This function should be rarely used, as "resolving" should be done in the gateway.
- */
-export const resolveVariable = (variable: string | EnvironmentVariable): string => {
-	if (variable === undefined) {
-		throw new Error(`could not resolve empty data variable: ${variable}`);
-	}
-	if (variable instanceof EnvironmentVariable) {
-		const environmentVariable = variable as EnvironmentVariable;
-		const resolved = process.env[environmentVariable.name];
-		if (resolved) {
-			return resolved;
-		}
-		return environmentVariable.defaultValue || '';
-	}
-	return variable;
-};
+import {
+	NodeOptions,
+	ResolvedNodeOptions,
+	ResolvedServerOptions,
+	resolveNodeOptions,
+	resolveServerOptions,
+	serverOptionsWithDefaults,
+} from './options';
+import { EnvironmentVariable, InputVariable, mapInputVariable, resolveConfigurationVariable } from './variables';
+import { InternalClient } from '../middleware/internal-client';
+import { Logger } from '../logger';
 
 export interface WunderGraphCorsConfiguration {
 	allowedOrigins: InputVariable[];
@@ -109,6 +84,7 @@ export interface WunderGraphCorsConfiguration {
 export interface WunderGraphConfigApplicationConfig {
 	application: Application;
 	codeGenerators?: CodeGen[];
+	options?: NodeOptions;
 	server?: WunderGraphHooksAndServerConfig;
 	cors: WunderGraphCorsConfiguration;
 	s3UploadProvider?: S3Provider;
@@ -188,34 +164,47 @@ export interface OperationHooksConfiguration<AsyncFn = OperationHookFunction> {
 	customResolve?: AsyncFn;
 }
 
-export interface HooksConfiguration<AsyncFn = OperationHookFunction> {
+// Any is used here because the exact type of the hooks is not known at compile time
+// We could work with an index signature + base type, but that would allow to add arbitrary data to the hooks
+export type OperationHooks = Record<string, any>;
+
+export interface HooksConfiguration<
+	Queries extends OperationHooks = OperationHooks,
+	Mutations extends OperationHooks = OperationHooks,
+	User extends WunderGraphUser = WunderGraphUser,
+	// Any is used here because the exact type of the base client is not known at compile time
+	// We could work with an index signature + base type, but that would allow to add arbitrary data to the client
+	IC extends InternalClient = InternalClient<any, any>
+> {
 	global?: {
 		httpTransport?: {
 			onOriginRequest?: {
-				hook: AsyncFn;
+				hook: OperationHookFunction;
 				enableForOperations?: string[];
 				enableForAllOperations?: boolean;
 			};
 			onOriginResponse?: {
-				hook: AsyncFn;
+				hook: OperationHookFunction;
 				enableForOperations?: string[];
 				enableForAllOperations?: boolean;
 			};
 		};
+		wsTransport?: {
+			onConnectionInit?: {
+				hook: OperationHookFunction;
+				enableForDataSources: string[];
+			};
+		};
 	};
 	authentication?: {
-		postAuthentication?: AsyncFn;
-		mutatingPostAuthentication?: AsyncFn;
-		revalidate?: AsyncFn;
+		postAuthentication?: (hook: AuthenticationHookRequest<User, IC>) => Promise<void>;
+		mutatingPostAuthentication?: (hook: AuthenticationHookRequest<User, IC>) => Promise<AuthenticationResponse<User>>;
+		revalidate?: (hook: AuthenticationHookRequest<User, IC>) => Promise<AuthenticationResponse<User>>;
+		postLogout?: (hook: AuthenticationHookRequest<User, IC>) => Promise<void>;
 	};
-	[HooksConfigurationOperationType.Queries]?: {
-		[operationName: string]: OperationHooksConfiguration<AsyncFn>;
-	};
-	[HooksConfigurationOperationType.Mutations]?: {
-		[operationName: string]: OperationHooksConfiguration<AsyncFn>;
-	};
+	[HooksConfigurationOperationType.Queries]?: Queries;
+	[HooksConfigurationOperationType.Mutations]?: Mutations;
 }
-
 export interface DeploymentAPI {
 	apiConfig: () => {
 		id: string;
@@ -255,6 +244,7 @@ interface ResolvedDeployment {
 	environment: {
 		id: string;
 		name: string;
+		baseUrl: string;
 	};
 	path: string;
 }
@@ -283,6 +273,7 @@ export interface ResolvedWunderGraphConfig {
 			postAuthentication: boolean;
 			mutatingPostAuthentication: boolean;
 			revalidateAuthentication: boolean;
+			postLogout: boolean;
 		};
 		cookieSecurity: {
 			secureCookieHashKey: ConfigurationVariable;
@@ -296,6 +287,8 @@ export interface ResolvedWunderGraphConfig {
 	};
 	interpolateVariableDefinitionAsJSON: string[];
 	webhooks: WebhookConfiguration[];
+	nodeOptions: ResolvedNodeOptions;
+	serverOptions?: ResolvedServerOptions;
 }
 
 const resolveConfig = async (config: WunderGraphConfigApplicationConfig): Promise<ResolvedWunderGraphConfig> => {
@@ -304,12 +297,18 @@ const resolveConfig = async (config: WunderGraphConfigApplicationConfig): Promis
 		name: config.application.name,
 	};
 
-	const environment = {
-		id: '',
-		name: listenAddr,
-	};
+	const resolvedNodeOptions = resolveNodeOptions(config.options);
+	const serverOptions = serverOptionsWithDefaults(config.server?.options);
+	const resolvedServerOptions = resolveServerOptions(serverOptions);
 
 	const name = 'main';
+	const publicNodeUrl = trimTrailingSlash(resolveConfigurationVariable(resolvedNodeOptions.publicNodeUrl));
+
+	const environment = {
+		id: '',
+		name: name,
+		baseUrl: publicNodeUrl,
+	};
 
 	const deploymentConfiguration: ResolvedDeployment = {
 		api,
@@ -331,14 +330,18 @@ const resolveConfig = async (config: WunderGraphConfigApplicationConfig): Promis
 			.map(mapInputVariable),
 	};
 
-	const graphqlApis = config.server?.graphqlServers?.map((gs) =>
-		introspectGraphqlServer({
+	const graphqlApis = config.server?.graphqlServers?.map((gs) => {
+		const serverPath = customGqlServerMountPath(gs.serverName);
+
+		return introspectGraphqlServer({
 			skipRenameRootFields: gs.skipRenameRootFields,
-			url: gs.url,
+			url: '',
+			baseUrl: serverOptions.serverUrl,
+			path: serverPath,
 			apiNamespace: gs.apiNamespace,
 			schema: gs.schema,
-		})
-	);
+		});
+	});
 
 	if (graphqlApis) {
 		config.application.apis.push(...graphqlApis);
@@ -396,6 +399,7 @@ const resolveConfig = async (config: WunderGraphConfigApplicationConfig): Promis
 				postAuthentication: config.server?.hooks?.authentication?.postAuthentication !== undefined,
 				mutatingPostAuthentication: config.server?.hooks?.authentication?.mutatingPostAuthentication !== undefined,
 				revalidateAuthentication: config.server?.hooks?.authentication?.revalidate !== undefined,
+				postLogout: config.server?.hooks?.authentication?.postLogout !== undefined,
 			},
 			cookieSecurity: {
 				secureCookieHashKey: mapInputVariable(config.authentication?.cookieBased?.secureCookieHashKey || ''),
@@ -409,6 +413,8 @@ const resolveConfig = async (config: WunderGraphConfigApplicationConfig): Promis
 		},
 		interpolateVariableDefinitionAsJSON: resolved.EngineConfiguration.interpolateVariableDefinitionAsJSON,
 		webhooks: [],
+		nodeOptions: resolvedNodeOptions,
+		serverOptions: resolvedServerOptions,
 	};
 
 	if (config.links) {
@@ -416,44 +422,6 @@ const resolveConfig = async (config: WunderGraphConfigApplicationConfig): Promis
 	}
 
 	return resolvedConfig;
-};
-
-export const mapInputVariable = (stringOrEnvironmentVariable: InputVariable) => {
-	if (stringOrEnvironmentVariable === undefined) {
-		console.log('unable to load environment variable');
-		console.log('make sure to replace \'process.env...\' with new EnvironmentVariable("%VARIABLE_NAME%")');
-		console.log('or ensure that all environment variables are defined\n');
-		throw new Error('InputVariable is undefined');
-	}
-	if (typeof stringOrEnvironmentVariable === 'string') {
-		const configVariable: ConfigurationVariable = {
-			kind: ConfigurationVariableKind.STATIC_CONFIGURATION_VARIABLE,
-			environmentVariableDefaultValue: '',
-			environmentVariableName: '',
-			placeholderVariableName: '',
-			staticVariableContent: stringOrEnvironmentVariable,
-		};
-		return configVariable;
-	}
-	if ((stringOrEnvironmentVariable as PlaceHolder)._identifier === 'placeholder') {
-		const variable: ConfigurationVariable = {
-			kind: ConfigurationVariableKind.PLACEHOLDER_CONFIGURATION_VARIABLE,
-			staticVariableContent: '',
-			placeholderVariableName: (stringOrEnvironmentVariable as PlaceHolder).name,
-			environmentVariableDefaultValue: '',
-			environmentVariableName: '',
-		};
-		return variable;
-	}
-	const environmentVariable = stringOrEnvironmentVariable as EnvironmentVariable;
-	const variable: ConfigurationVariable = {
-		kind: ConfigurationVariableKind.ENV_CONFIGURATION_VARIABLE,
-		staticVariableContent: '',
-		placeholderVariableName: '',
-		environmentVariableDefaultValue: environmentVariable.defaultValue || '',
-		environmentVariableName: environmentVariable.name,
-	};
-	return variable;
 };
 
 const addLinks = (config: ResolvedWunderGraphConfig, links: LinkDefinition[]): ResolvedWunderGraphConfig => {
@@ -492,10 +460,10 @@ const addLink = (
 				fieldInfo.arguments.forEach((expected) => {
 					const exists = link.argumentSources.find((actual) => actual.name === expected.name) !== undefined;
 					if (!exists) {
-						console.log(
+						Logger.error(
 							`configuration missing for argument: ${expected.name} on targetField: ${link.targetFieldName} on targetType: ${link.targetType}`
 						);
-						console.log(
+						Logger.info(
 							'please add \'.argument("towerIds", ...)\' to the linkBuilder or the resolver will not be configured properly'
 						);
 					}
@@ -656,7 +624,7 @@ export const configureWunderGraphApplication = (config: WunderGraphConfigApplica
 
 			fs.writeFileSync(path.join('generated', schemaFileName), schemaContent, { encoding: 'utf8' });
 			done();
-			console.log(`${new Date().toLocaleTimeString()}: ${schemaFileName} updated`);
+			Logger.info(`${schemaFileName} updated`);
 
 			/**
 			 * Webhooks
@@ -805,6 +773,28 @@ export const configureWunderGraphApplication = (config: WunderGraphConfigApplica
 				}
 			}
 
+			if (config.server?.hooks?.global?.wsTransport?.onConnectionInit) {
+				const enableForDataSources = config.server?.hooks?.global?.wsTransport?.onConnectionInit.enableForDataSources;
+				app.EngineConfiguration.DataSources = app.EngineConfiguration.DataSources.map((ds) => {
+					if (ds.Id !== undefined && ds.Id !== '' && ds.Kind === DataSourceKind.GRAPHQL) {
+						if (enableForDataSources.includes(ds.Id)) {
+							let Custom: GraphQLApiCustom = ds.Custom as GraphQLApiCustom;
+
+							Custom = {
+								...Custom,
+								HooksConfiguration: { onWSTransportConnectionInit: true },
+							};
+
+							return {
+								...ds,
+								Custom,
+							};
+						}
+					}
+					return ds;
+				});
+			}
+
 			for (const operationName in config.server?.hooks?.queries) {
 				const hooks = config.server?.hooks!.queries[operationName];
 				const op = app.Operations.find((op) => op.OperationType === OperationType.QUERY && op.Name === operationName);
@@ -849,7 +839,7 @@ export const configureWunderGraphApplication = (config: WunderGraphConfigApplica
 					});
 				}
 				done();
-				console.log(`${new Date().toLocaleTimeString()}: Code generation completed.`);
+				Logger.info(`Code generation completed.`);
 			}
 
 			const configJsonPath = path.join('generated', 'wundergraph.config.json');
@@ -859,14 +849,16 @@ export const configureWunderGraphApplication = (config: WunderGraphConfigApplica
 				const existing = fs.readFileSync(configJsonPath, 'utf8');
 				if (configJSON !== existing) {
 					fs.writeFileSync(configJsonPath, configJSON, { encoding: 'utf8' });
-					console.log(`${new Date().toLocaleTimeString()}: wundergraph.config.json updated`);
+					Logger.info(`wundergraph.config.json updated`);
 				}
 			} else {
 				fs.writeFileSync(configJsonPath, configJSON, { encoding: 'utf8' });
-				console.log(`${new Date().toLocaleTimeString()}: wundergraph.config.json created`);
+				Logger.info(`wundergraph.config.json created`);
 			}
 
 			done();
+
+			let publicNodeUrl = trimTrailingSlash(resolveConfigurationVariable(resolved.nodeOptions.publicNodeUrl));
 
 			const dotGraphQLNested =
 				config.dotGraphQLConfig?.hasDotWunderGraphDirectory !== undefined
@@ -874,7 +866,7 @@ export const configureWunderGraphApplication = (config: WunderGraphConfigApplica
 					: true;
 
 			const dotGraphQLConfig = generateDotGraphQLConfig(config, {
-				baseURL: 'http://localhost:9991',
+				baseURL: publicNodeUrl,
 				nested: dotGraphQLNested,
 			});
 
@@ -890,14 +882,14 @@ export const configureWunderGraphApplication = (config: WunderGraphConfigApplica
 
 			if (shouldUpdateDotGraphQLConfig) {
 				fs.writeFileSync(dotGraphQLConfigPath, dotGraphQLContent, { encoding: 'utf8' });
-				console.log(`${new Date().toLocaleTimeString()}: .graphqlconfig updated`);
+				Logger.info(`.graphqlconfig updated`);
 			}
 
 			done();
 
 			const postman = PostmanBuilder(app.Operations, {
 				applicationPath: resolved.deployment.path,
-				baseURL: 'http://localhost:9991',
+				baseURL: publicNodeUrl,
 			});
 			fs.writeFileSync(
 				path.join('generated', 'wundergraph.postman.json'),
@@ -906,12 +898,12 @@ export const configureWunderGraphApplication = (config: WunderGraphConfigApplica
 					encoding: 'utf8',
 				}
 			);
-			console.log(`${new Date().toLocaleTimeString()}: wundergraph.postman.json updated`);
+			Logger.info(`wundergraph.postman.json updated`);
 
 			done();
 		})
 		.catch((e: any) => {
-			console.error(`Couldn't configure your WunderNode: ${e}`);
+			Logger.fatal(`Couldn't configure your WunderNode: ${e}`);
 			process.exit(1);
 		});
 };
@@ -921,10 +913,10 @@ let doneCount = 0;
 
 const done = () => {
 	doneCount++;
-	console.log(`${new Date().toLocaleTimeString()}: ${doneCount}/${total} done`);
+	Logger.info(`${doneCount}/${total} done`);
 	if (doneCount === 3) {
 		setTimeout(() => {
-			console.log(`${new Date().toLocaleTimeString()}: code generation completed`);
+			Logger.info(`code generation completed`);
 			process.exit(0);
 		}, 10);
 	}
@@ -1016,6 +1008,8 @@ const ResolvedWunderGraphConfigToJSON = (config: ResolvedWunderGraphConfig): str
 			},
 			allowedHostNames: config.security.allowedHostNames,
 			webhooks: config.webhooks,
+			nodeOptions: config.nodeOptions,
+			serverOptions: config.serverOptions,
 		},
 		dangerouslyEnableGraphQLEndpoint: config.enableGraphQLEndpoint,
 	};
@@ -1025,6 +1019,7 @@ const ResolvedWunderGraphConfigToJSON = (config: ResolvedWunderGraphConfig): str
 
 const mapDataSource = (source: DataSource): DataSourceConfiguration => {
 	const out: DataSourceConfiguration = {
+		id: source.Id || '',
 		kind: source.Kind,
 		customGraphql: undefined,
 		rootNodes: source.RootNodes,
@@ -1034,6 +1029,7 @@ const mapDataSource = (source: DataSource): DataSourceConfiguration => {
 		overrideFieldPathFromAlias: source.Kind === DataSourceKind.GRAPHQL,
 		customDatabase: undefined,
 		directives: source.Directives,
+		requestTimeoutSeconds: source.RequestTimeoutSeconds,
 	};
 	switch (source.Kind) {
 		case DataSourceKind.REST:
@@ -1066,8 +1062,10 @@ const mapDataSource = (source: DataSource): DataSourceConfiguration => {
 				subscription: {
 					enabled: graphql.Subscription.Enabled,
 					url: graphql.Subscription.URL,
+					useSSE: graphql.Subscription.UseSSE,
 				},
 				upstreamSchema: graphql.UpstreamSchema,
+				hooksConfiguration: graphql.HooksConfiguration,
 			};
 			break;
 		case DataSourceKind.POSTGRESQL:
@@ -1122,7 +1120,7 @@ export const configurePublishWunderGraphAPI = (configuration: PublishConfigurati
 	const outFile = path.join('generated', `${configuration.organization}.${configuration.name}.api.json`);
 	_configurePublishWunderGraphAPI(configuration, outFile)
 		.then(() => {
-			console.log(
+			Logger.info(
 				colors.blue(`${configuration.organization}/${configuration.name} API configuration written to ${outFile}`)
 			);
 			if (process.env.WUNDERGRAPH_PUBLISH_API === 'true') {
@@ -1132,19 +1130,19 @@ export const configurePublishWunderGraphAPI = (configuration: PublishConfigurati
 						timeout: 1000 * 5,
 					});
 					if (result?.failed) {
-						console.error(colors.red(`Failed to publish ${configuration.organization}/${configuration.name}`));
+						Logger.error(colors.red(`Failed to publish ${configuration.organization}/${configuration.name}`));
 					}
 				} catch (e) {
-					console.error(colors.red(`Failed to publish ${configuration.organization}/${configuration.name}`));
+					Logger.error(colors.red(`Failed to publish ${configuration.organization}/${configuration.name}`));
 				}
 			} else {
-				console.log(colors.blue(`You can now publish the API using the following command:`));
-				console.log(colors.green(`wunderctl publish ${configuration.organization}/${configuration.name}`));
+				Logger.info(colors.blue(`You can now publish the API using the following command:`));
+				Logger.info(colors.green(`wunderctl publish ${configuration.organization}/${configuration.name}`));
 			}
 		})
 		.catch((err) => {
-			console.error(`Failed to create publish configuration for ${configuration.organization}/${configuration.name}`);
-			console.error(err);
+			Logger.error(`Failed to create publish configuration for ${configuration.organization}/${configuration.name}`);
+			Logger.error(err);
 		});
 };
 
@@ -1238,4 +1236,12 @@ export const resolveIntegration = (
 		return Promise.resolve(applyNamespaceToApi(published.definition, apiNamespace, []));
 	}
 	return Promise.resolve(published.definition);
+};
+
+export const customGqlServerMountPath = (name: string): string => {
+	return `/gqls/${name}/graphql`;
+};
+
+const trimTrailingSlash = (url: string): string => {
+	return url.endsWith('/') ? url.slice(0, -1) : url;
 };

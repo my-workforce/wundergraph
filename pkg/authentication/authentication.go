@@ -21,10 +21,10 @@ import (
 	"github.com/gorilla/csrf"
 	"github.com/gorilla/securecookie"
 	"github.com/jensneuse/abstractlogger"
-	"github.com/wundergraph/wundergraph/pkg/loadvariable"
-	"github.com/wundergraph/wundergraph/types/go/wgpb"
 
 	"github.com/wundergraph/wundergraph/pkg/hooks"
+	"github.com/wundergraph/wundergraph/pkg/loadvariable"
+	"github.com/wundergraph/wundergraph/pkg/wgpb"
 )
 
 func init() {
@@ -58,42 +58,49 @@ func (u *UserLoader) userFromToken(token string, cfg *UserLoadConfig, user *User
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.userInfoEndpoint, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", token)
-	res, err := u.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return err
-	}
-	var claims Claims
-	err = json.Unmarshal(body, &claims)
-	if err != nil {
-		return err
-	}
-	tempUser := User{
-		ProviderName:  "token",
-		ProviderID:    cfg.issuer,
-		Email:         claims.Email,
-		EmailVerified: claims.EmailVerified,
-		Name:          claims.Name,
-		FirstName:     claims.GivenName,
-		LastName:      claims.FamilyName,
-		NickName:      "",
-		Description:   "",
-		UserID:        claims.Sub,
-		AvatarURL:     claims.Picture,
-		Location:      claims.Locale,
-		ETag:          "",
-		AccessToken:   tryParseJWT(token),
+	var tempUser User
+
+	if cfg.userInfoEndpoint == "" {
+		tempUser = User{
+			ProviderName: "token",
+			ProviderID:   cfg.issuer,
+			AccessToken:  tryParseJWT(token),
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.userInfoEndpoint, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", token)
+		res, err := u.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer res.Body.Close()
+		body, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			return err
+		}
+		var claims Claims
+		err = json.Unmarshal(body, &claims)
+		if err != nil {
+			return err
+		}
+		tempUser = User{
+			ProviderName:  "token",
+			ProviderID:    cfg.issuer,
+			Email:         claims.Email,
+			EmailVerified: claims.EmailVerified,
+			Name:          claims.Name,
+			FirstName:     claims.GivenName,
+			LastName:      claims.FamilyName,
+			UserID:        claims.Sub,
+			AvatarURL:     claims.Picture,
+			Location:      claims.Locale,
+			AccessToken:   tryParseJWT(token),
+		}
 	}
 	u.hooks.handlePostAuthentication(context.Background(), tempUser)
 	proceed, _, tempUser := u.hooks.handleMutatingPostAuthentication(context.Background(), tempUser)
@@ -241,6 +248,7 @@ type Hooks struct {
 	Log                        abstractlogger.Logger
 	PostAuthentication         bool
 	MutatingPostAuthentication bool
+	PostLogout                 bool
 }
 
 func (h *Hooks) handlePostAuthentication(ctx context.Context, user User) {
@@ -258,6 +266,23 @@ func (h *Hooks) handlePostAuthentication(ctx context.Context, user User) {
 	if err != nil {
 		h.Log.Error("PostAuthentication queries hook", abstractlogger.Error(err))
 		return
+	}
+}
+
+func (h *Hooks) handlePostLogout(ctx context.Context, user *User) {
+	if !h.PostLogout || user == nil {
+		return
+	}
+	hookData := []byte(`{}`)
+	if userJson, err := json.Marshal(user); err != nil {
+		h.Log.Error("Could not marshal user", abstractlogger.Error(err))
+		return
+	} else {
+		hookData, _ = jsonparser.Set(hookData, userJson, "__wg", "user")
+	}
+	_, err := h.Client.DoAuthenticationRequest(ctx, hooks.PostLogout, hookData)
+	if err != nil {
+		h.Log.Error("PostLogout queries hook", abstractlogger.Error(err))
 	}
 }
 
@@ -693,7 +718,7 @@ func (u *CookieUserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var res MutatingPostAuthenticationResponse
 		err = json.Unmarshal(out.Response, &res)
 		if res.Status != "ok" {
-			u.Log.Error("MutatingPostAuthenticationResponse status is not ok", abstractlogger.Error(err))
+			u.Log.Error("RevalidateAuthentication status is not ok", abstractlogger.Error(err))
 			http.NotFound(w, r)
 			return
 		}
@@ -702,6 +727,7 @@ func (u *CookieUserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		user = &res.User
 		err = user.Save(u.Cookie, w, r, u.Host, u.InsecureCookies)
 		if err != nil {
+			u.Log.Error("RevalidateAuthentication could not save cookie", abstractlogger.Error(err))
 			http.NotFound(w, r)
 			return
 		}
@@ -736,16 +762,18 @@ func (_ *CSRFTokenHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type UserLogoutHandler struct {
 	InsecureCookies                  bool
 	OpenIDConnectIssuersToLogoutURLs map[string]string
+	Hooks                            Hooks
 }
 
 func (u *UserLogoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resetUserCookies(w, r, !u.InsecureCookies)
-	logoutOpenIDConnectProvider := r.URL.Query().Get("logout_openid_connect_provider") == "true"
-	if !logoutOpenIDConnectProvider {
-		return
-	}
 	user := UserFromContext(r.Context())
 	if user == nil {
+		return
+	}
+	u.Hooks.handlePostLogout(r.Context(), user)
+	logoutOpenIDConnectProvider := r.URL.Query().Has("logout_openid_connect_provider")
+	if !logoutOpenIDConnectProvider {
 		return
 	}
 	if user.ProviderName != "oidc" {
@@ -773,10 +801,8 @@ func (u *UserLogoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{
 		Timeout: time.Second * 10,
 	}
-	res, err := client.Do(req)
-	if err != nil || res.StatusCode != http.StatusOK {
-		return
-	}
+	_, _ = client.Do(req)
+	// we can safely ignore the outcome
 }
 
 type CSRFErrorHandler struct {

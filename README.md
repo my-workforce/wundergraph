@@ -70,6 +70,7 @@ min)**](https://wundergraph.com/docs/guides/getting_started/quickstart) if you d
 - [Migrate from Apollo GraphQL](./examples/migrate-from-apollo)
 - [Publish & Install APIs](./examples/publish-install-api)
 - [Dockerize WunderGraph](https://github.com/wundergraph/docker)
+- [Typesafe Golang Client](/examples/golang-client)
 
 ## The WunderGraph Stack
 
@@ -147,6 +148,7 @@ security concerns to WunderGraph.
 - [Email Support](mailto:info@wundergraph.com). Best for: specific questions around WunderGraph as an early enterprise adopter.
 - [Slack Support](mailto:info@wundergraph.com). Best for: problems with WunderGraph as an enterprise customer.
 - [Discord](https://discord.gg/Jjmc8TC). Best for: sharing your applications and hanging out with the community.
+- [Feedback and Feature Requests](https://wundergraph.canny.io/). Best for: discussing and voting on feature requests and giving feedback to our developers.
 
 ## Enterprise
 

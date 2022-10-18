@@ -5,15 +5,16 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/jensneuse/abstractlogger"
-	"github.com/wundergraph/wundergraph/pkg/loadvariable"
 	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 
-	"github.com/wundergraph/wundergraph/types/go/wgpb"
+	"github.com/jensneuse/abstractlogger"
+
+	"github.com/wundergraph/wundergraph/pkg/loadvariable"
+	"github.com/wundergraph/wundergraph/pkg/wgpb"
 )
 
 func New(config *wgpb.WebhookConfiguration, pathPrefix, hooksServerURL string, log abstractlogger.Logger) (http.Handler, error) {
@@ -55,9 +56,7 @@ type webhookHandler struct {
 }
 
 func (h *webhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, h.pathPrefix) {
-		r.URL.Path = r.URL.Path[len(h.pathPrefix):]
-	}
+	r.URL.Path = strings.TrimPrefix(r.URL.Path, h.pathPrefix)
 	if r.Body != nil && h.verifier != nil {
 		if !h.verifier.Verify(r) {
 			h.log.Error("Webhook verification failed",

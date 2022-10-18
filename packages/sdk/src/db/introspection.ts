@@ -1,5 +1,4 @@
 import { wunderctlExecAsync } from '../wunderctlexec';
-import { resolveVariable } from '../configure';
 import { InputValueDefinitionNode, parse, parseType, print, TypeNode, visit } from 'graphql';
 import { DatabaseIntrospection, ReplaceJSONTypeFieldConfiguration } from '../definition';
 import { SingleTypeField } from '@wundergraph/protobuf';
@@ -9,6 +8,8 @@ import _ from 'lodash';
 import * as fs from 'fs';
 import hash from 'object-hash';
 import path from 'path';
+import { resolveVariable } from '../configure/variables';
+import { Logger } from '../logger';
 
 export interface PrismaDatabaseIntrospectionResult {
 	success: boolean;
@@ -23,10 +24,24 @@ export interface PrismaDatabaseIntrospectionResult {
 
 export type DatabaseSchema = 'postgresql' | 'mysql' | 'sqlite' | 'sqlserver' | 'planetscale' | 'mongodb';
 
+const _ensurePrisma = async () => {
+	Logger.info('Installing prisma...');
+	await wunderctlExecAsync({
+		cmd: ['installPrismaDependencies'],
+	});
+	Logger.info('Installing prisma... done');
+};
+
+let ensurePrisma: Promise<void> | undefined;
+
 const introspectPrismaDatabase = async (
 	databaseURL: string,
 	databaseSchema: DatabaseSchema
 ): Promise<PrismaDatabaseIntrospectionResult> => {
+	if (!ensurePrisma) {
+		ensurePrisma = _ensurePrisma();
+	}
+	await ensurePrisma;
 	const id = hash({ databaseURL, databaseSchema });
 	const introspectionDir = path.join('generated', 'introspection', 'database');
 	if (!fs.existsSync(introspectionDir)) {
@@ -83,11 +98,11 @@ export const introspectPrismaDatabaseWithRetries = async (
 					jsonResponseFields,
 				};
 			}
-			console.log('database introspection failed: ' + (result.message || ''));
+			Logger.error('database introspection failed: ' + (result.message || ''));
 		} catch (e) {
-			console.log('database introspection failed: ' + e);
+			Logger.error('database introspection failed: ' + e);
 		}
-		console.log(`retrying database introspection ${i + 1}/${maxRetries}`);
+		Logger.info(`retrying database introspection ${i + 1}/${maxRetries}`);
 	}
 
 	const message = `introspection of ${databaseSchema} database failed after 5 attempts, make sure it's accessible at: ${introspection.databaseURL}

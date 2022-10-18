@@ -15,6 +15,7 @@ import (
 	"github.com/buger/jsonparser"
 	"github.com/jensneuse/abstractlogger"
 	"github.com/tidwall/sjson"
+
 	"github.com/wundergraph/graphql-go-tools/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/pkg/astnormalization"
 	"github.com/wundergraph/graphql-go-tools/pkg/astparser"
@@ -103,6 +104,7 @@ type Configuration struct {
 	CloseTimeoutSeconds int64
 	JsonTypeFields      []SingleTypeField
 	JsonInputVariables  []string
+	WunderGraphDir      string
 }
 
 type SingleTypeField struct {
@@ -182,7 +184,7 @@ func (p *Planner) ConfigureFetch() plan.FetchConfiguration {
 	return plan.FetchConfiguration{
 		Input: string(rawInput),
 		DataSource: &Source{
-			engine: p.engineFactory.Engine(p.config.PrismaSchema, p.config.CloseTimeoutSeconds),
+			engine: p.engineFactory.Engine(p.config.PrismaSchema, p.config.WunderGraphDir, p.config.CloseTimeoutSeconds),
 			debug:  p.debug,
 			log:    p.log,
 		},
@@ -722,22 +724,25 @@ Skips replace when:
 Example transformation:
 Original schema definition:
 
-type Query {
-	serviceOne(serviceOneArg: String): ServiceOneResponse
-	serviceTwo(serviceTwoArg: Boolean): ServiceTwoResponse
-}
-type ServiceOneResponse {
-	fieldOne: String!
-	countries: [Country!]! # nested datasource without explicit field path
-}
-type ServiceTwoResponse {
-	fieldTwo: String
-	serviceOneField: String
-	serviceOneResponse: ServiceOneResponse # nested datasource with implicit field path "serviceOne"
-}
-type Country {
-	name: String!
-}
+	type Query {
+		serviceOne(serviceOneArg: String): ServiceOneResponse
+		serviceTwo(serviceTwoArg: Boolean): ServiceTwoResponse
+	}
+
+	type ServiceOneResponse {
+		fieldOne: String!
+		countries: [Country!]! # nested datasource without explicit field path
+	}
+
+	type ServiceTwoResponse {
+		fieldTwo: String
+		serviceOneField: String
+		serviceOneResponse: ServiceOneResponse # nested datasource with implicit field path "serviceOne"
+	}
+
+	type Country {
+		name: String!
+	}
 
 `serviceOneResponse` field of a `ServiceTwoResponse` is nested but has a field path that exists on the Query type
 - In this case definition will not be modified
@@ -747,24 +752,25 @@ type Country {
 
 Modified schema definition:
 
-schema {
-   query: ServiceOneResponse
-}
+	schema {
+	   query: ServiceOneResponse
+	}
 
-type ServiceOneResponse {
-   fieldOne: String!
-   countries: [Country!]!
-}
+	type ServiceOneResponse {
+	   fieldOne: String!
+	   countries: [Country!]!
+	}
 
-type ServiceTwoResponse {
-   fieldTwo: String
-   serviceOneField: String
-   serviceOneResponse: ServiceOneResponse
-}
+	type ServiceTwoResponse {
+	   fieldTwo: String
+	   serviceOneField: String
+	   serviceOneResponse: ServiceOneResponse
+	}
 
-type Country {
-   name: String!
-}
+	type Country {
+	   name: String!
+	}
+
 Refer to pkg/engine/datasource/graphql_datasource/graphql_datasource_test.go:632
 Case name: TestGraphQLDataSource/nested_graphql_engines
 
@@ -871,6 +877,15 @@ type Factory struct {
 	Log           abstractlogger.Logger
 }
 
+func (f *Factory) WithHTTPClient(client *http.Client) *Factory {
+	return &Factory{
+		Client:        client,
+		engineFactory: f.engineFactory,
+		Debug:         f.Debug,
+		Log:           f.Log,
+	}
+}
+
 func (f *Factory) Planner(ctx context.Context) plan.DataSourcePlanner {
 	f.engineFactory.closer = ctx.Done()
 	return &Planner{
@@ -886,7 +901,7 @@ type LazyEngineFactory struct {
 	engines map[string]*LazyEngine
 }
 
-func (f *LazyEngineFactory) Engine(prismaSchema string, closeTimeoutSeconds int64) *LazyEngine {
+func (f *LazyEngineFactory) Engine(prismaSchema, wundergraphDir string, closeTimeoutSeconds int64) *LazyEngine {
 	if f.engines == nil {
 		f.engines = map[string]*LazyEngine{}
 	}
@@ -897,6 +912,7 @@ func (f *LazyEngineFactory) Engine(prismaSchema string, closeTimeoutSeconds int6
 	engine = &LazyEngine{
 		m:                   &sync.RWMutex{},
 		prismaSchema:        prismaSchema,
+		wundergraphDir:      wundergraphDir,
 		closeTimeoutSeconds: closeTimeoutSeconds,
 	}
 	go engine.Start(f.closer)
@@ -915,6 +931,7 @@ type LazyEngine struct {
 	m *sync.RWMutex
 
 	prismaSchema        string
+	wundergraphDir      string
 	closeTimeoutSeconds int64
 
 	engine HybridEngine
@@ -981,7 +998,11 @@ func (e *LazyEngine) initEngineAndExecute(ctx context.Context, request []byte, o
 	e.m.Lock()
 	defer e.m.Unlock()
 	var err error
-	e.engine, err = NewHybridEngine(e.prismaSchema, abstractlogger.NoopLogger)
+	e.engine, err = NewHybridEngine(e.prismaSchema, e.wundergraphDir, abstractlogger.NoopLogger)
+	if err != nil {
+		return err
+	}
+	err = e.engine.WaitUntilReady(ctx)
 	if err != nil {
 		return err
 	}

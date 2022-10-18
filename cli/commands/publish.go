@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
 	"github.com/wundergraph/wundergraph/pkg/files"
 	"github.com/wundergraph/wundergraph/pkg/v2wundergraphapi"
 )
@@ -23,7 +24,7 @@ The APIs to publish need to be generated into the .wundergraph/generated directo
 	Example: `wunderctl publish organization/api`,
 	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		wgDir, err := files.FindWunderGraphDir(wundergraphDir)
+		wunderGraphDir, err := files.FindWunderGraphDir(_wunderGraphDirConfig)
 		if err != nil {
 			return err
 		}
@@ -45,7 +46,7 @@ The APIs to publish need to be generated into the .wundergraph/generated directo
 			api := orgAndApi[1]
 			apiName := fmt.Sprintf("%s/%s", org, api)
 			fileName := fmt.Sprintf("%s.%s.api.json", org, api)
-			filePath := path.Join(wgDir, "generated", fileName)
+			filePath := path.Join(wunderGraphDir, "generated", fileName)
 
 			if _, err := os.Stat(filePath); os.IsNotExist(err) {
 				_, _ = red.Printf("API file does not exist: %s\n", filePath)

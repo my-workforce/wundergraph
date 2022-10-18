@@ -10,29 +10,39 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/buger/jsonparser"
 	"github.com/jensneuse/abstractlogger"
+
 	"github.com/wundergraph/graphql-go-tools/pkg/engine/datasource/graphql_datasource"
 	"github.com/wundergraph/graphql-go-tools/pkg/engine/datasource/staticdatasource"
 	"github.com/wundergraph/graphql-go-tools/pkg/engine/plan"
-	oas_datasource "github.com/wundergraph/wundergraph/pkg/datasources/oas"
-	"github.com/wundergraph/wundergraph/pkg/loadvariable"
-	"github.com/wundergraph/wundergraph/types/go/wgpb"
 
+	"github.com/wundergraph/wundergraph/pkg/authentication"
 	"github.com/wundergraph/wundergraph/pkg/datasources/database"
+	oas_datasource "github.com/wundergraph/wundergraph/pkg/datasources/oas"
+	"github.com/wundergraph/wundergraph/pkg/hooks"
+	"github.com/wundergraph/wundergraph/pkg/loadvariable"
+	"github.com/wundergraph/wundergraph/pkg/wgpb"
 )
 
 type EngineConfigLoader struct {
-	resolvers []FactoryResolver
+	wundergraphDir string
+	resolvers      []FactoryResolver
 }
 
 type FactoryResolver interface {
 	Resolve(ds *wgpb.DataSourceConfiguration) (plan.PlannerFactory, error)
 }
 
-type ApiTransportFactory func(tripper http.RoundTripper) http.RoundTripper
+// Defined again here to avoid circular reference to apihandler.ApiTransportFactory
 
+type ApiTransportFactory interface {
+	RoundTripper(tripper http.RoundTripper, enableStreamingMode bool) http.RoundTripper
+	DefaultTransportTimeout() time.Duration
+}
 type DefaultFactoryResolver struct {
 	baseTransport    http.RoundTripper
 	transportFactory ApiTransportFactory
@@ -40,19 +50,27 @@ type DefaultFactoryResolver struct {
 	rest             *oas_datasource.Factory
 	static           *staticdatasource.Factory
 	database         *database.Factory
+	hooksClient      *hooks.Client
 }
 
-func NewDefaultFactoryResolver(transportFactory ApiTransportFactory, baseTransport http.RoundTripper, debug bool, log abstractlogger.Logger) *DefaultFactoryResolver {
+func NewDefaultFactoryResolver(transportFactory ApiTransportFactory, baseTransport http.RoundTripper,
+	debug bool, log abstractlogger.Logger, hooksClient *hooks.Client) *DefaultFactoryResolver {
+
 	defaultHttpClient := &http.Client{
-		Timeout:   time.Second * 10,
-		Transport: transportFactory(baseTransport),
+		Timeout:   transportFactory.DefaultTransportTimeout(),
+		Transport: transportFactory.RoundTripper(baseTransport, false),
 	}
+	streamingClient := &http.Client{
+		Transport: transportFactory.RoundTripper(baseTransport, true),
+	}
+
 	return &DefaultFactoryResolver{
 		baseTransport:    baseTransport,
 		transportFactory: transportFactory,
 		graphql: &graphql_datasource.Factory{
-			HTTPClient:   defaultHttpClient,
-			BatchFactory: graphql_datasource.NewBatchFactory(),
+			HTTPClient:      defaultHttpClient,
+			StreamingClient: streamingClient,
+			BatchFactory:    graphql_datasource.NewBatchFactory(),
 		},
 		rest: &oas_datasource.Factory{
 			Client: defaultHttpClient,
@@ -63,11 +81,25 @@ func NewDefaultFactoryResolver(transportFactory ApiTransportFactory, baseTranspo
 			Debug:  debug,
 			Log:    log,
 		},
+		hooksClient: hooksClient,
 	}
 }
 
-// tryCreateHTTPSClient creates a http client with the given options or defaults to the standard client if no mTLS options are given
-func (d *DefaultFactoryResolver) tryCreateHTTPSClient(mTLS *wgpb.MTLSConfiguration) (*http.Client, error) {
+// requiresCustomHTTPClient returns true iff the given FetchConfiguration requires a dedicated HTTP client
+func (d *DefaultFactoryResolver) requiresCustomHTTPClient(ds *wgpb.DataSourceConfiguration, cfg *wgpb.FetchConfiguration) bool {
+	// when a custom timeout is specified, we can't use the shared http.Client
+	if ds != nil && ds.RequestTimeoutSeconds > 0 {
+		return true
+	}
+	// when mTLS is enabled, we need to create a new client
+	if cfg != nil && cfg.MTLS != nil {
+		return true
+	}
+	return false
+}
+
+// customTLSRoundTripper returns a TLS http.Roundtripper with the given key and certificates loaded
+func (d *DefaultFactoryResolver) customTLSRoundTripper(mTLS *wgpb.MTLSConfiguration) (http.RoundTripper, error) {
 	privateKey := loadvariable.String(mTLS.Key)
 	caCert := loadvariable.String(mTLS.Cert)
 
@@ -78,7 +110,7 @@ func (d *DefaultFactoryResolver) tryCreateHTTPSClient(mTLS *wgpb.MTLSConfigurati
 	caCertData := []byte(caCert)
 	cert, err := tls.X509KeyPair(caCertData, []byte(privateKey))
 	if err != nil {
-		return nil, errors.New("unable to build key pair")
+		return nil, fmt.Errorf("unable to build key pair: %w", err)
 	}
 
 	dialer := &net.Dialer{
@@ -91,7 +123,7 @@ func (d *DefaultFactoryResolver) tryCreateHTTPSClient(mTLS *wgpb.MTLSConfigurati
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM(caCertData)
 
-	mtlsTransport := &http.Transport{
+	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, addr)
 		},
@@ -103,42 +135,101 @@ func (d *DefaultFactoryResolver) tryCreateHTTPSClient(mTLS *wgpb.MTLSConfigurati
 			RootCAs:            caCertPool,
 			InsecureSkipVerify: mTLS.InsecureSkipVerify,
 		},
+	}, nil
+}
+
+// newHTTPClient returns a custom http.Client with the given FetchConfiguration applied. Configuration
+// should have been previously validated by d.fetchConfigurationRequiresDedicatedHTTPClient()
+func (d *DefaultFactoryResolver) newHTTPClient(ds *wgpb.DataSourceConfiguration, cfg *wgpb.FetchConfiguration) (*http.Client, error) {
+	// Timeout
+	timeout := d.transportFactory.DefaultTransportTimeout()
+	if ds != nil && ds.RequestTimeoutSeconds > 0 {
+		timeout = time.Duration(ds.RequestTimeoutSeconds) * time.Second
+	}
+	// TLS
+	var transport http.RoundTripper
+	var err error
+	if cfg != nil && cfg.MTLS != nil {
+		transport, err = d.customTLSRoundTripper(cfg.MTLS)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		transport = d.baseTransport
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: d.transportFactory.RoundTripper(transport, false),
+	}, nil
+}
+
+func (d *DefaultFactoryResolver) onWsConnectionInitCallback() *graphql_datasource.OnWsConnectionInitCallback {
+	var callback graphql_datasource.OnWsConnectionInitCallback = func(ctx context.Context, url string, header http.Header) (json.RawMessage, error) {
+		payload := hooks.OnWsConnectionInitHookPayload{
+			Request: hooks.WunderGraphRequest{
+				RequestURI: url,
+				Headers:    hooks.HeaderSliceToCSV(header),
+			},
+		}
+		hookData, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+
+		if user := authentication.UserFromContext(ctx); user != nil {
+			if userJson, err := json.Marshal(user); err == nil {
+				hookData, _ = jsonparser.Set(hookData, userJson, "__wg", "user")
+			}
+		}
+
+		out, err := d.hooksClient.DoWsTransportRequest(ctx, hooks.WsTransportOnConnectionInit, hookData)
+		if err != nil {
+			return nil, err
+		}
+
+		resp := struct {
+			Payload json.RawMessage `json:"payload"`
+		}{}
+
+		if err := json.Unmarshal(out.Response, &resp); err != nil {
+			return nil, err
+		}
+
+		return resp.Payload, nil
 	}
 
-	baseTransportWithMTLS := d.transportFactory(mtlsTransport)
-
-	return &http.Client{
-		Timeout:   time.Second * 10,
-		Transport: baseTransportWithMTLS,
-	}, nil
-
+	return &callback
 }
 
 func (d *DefaultFactoryResolver) Resolve(ds *wgpb.DataSourceConfiguration) (plan.PlannerFactory, error) {
 	switch ds.Kind {
 	case wgpb.DataSourceKind_GRAPHQL:
-		// when mTLS is enabled, we need to create a new client
-		if ds.CustomGraphql != nil && ds.CustomGraphql.Fetch != nil && ds.CustomGraphql.Fetch.MTLS != nil {
-			client, err := d.tryCreateHTTPSClient(ds.CustomGraphql.Fetch.MTLS)
-			if err != nil {
-				return nil, err
-			}
-			return &graphql_datasource.Factory{
-				HTTPClient:   client,
-				BatchFactory: graphql_datasource.NewBatchFactory(),
-			}, nil
+		factory := &graphql_datasource.Factory{
+			HTTPClient:      d.graphql.HTTPClient,
+			StreamingClient: d.graphql.StreamingClient,
+			BatchFactory:    d.graphql.BatchFactory,
 		}
-		return d.graphql, nil
-	case wgpb.DataSourceKind_REST:
-		// when mTLS is enabled, we need to create a new client
-		if ds.CustomRest != nil && ds.CustomRest.Fetch != nil && ds.CustomRest.Fetch.MTLS != nil {
-			client, err := d.tryCreateHTTPSClient(ds.CustomRest.Fetch.MTLS)
+
+		if d.requiresCustomHTTPClient(ds, ds.CustomGraphql.Fetch) {
+			client, err := d.newHTTPClient(ds, ds.CustomGraphql.Fetch)
 			if err != nil {
 				return nil, err
 			}
-			return &oas_datasource.Factory{
-				Client: client,
-			}, nil
+			factory.HTTPClient = client
+		}
+
+		if ds.CustomGraphql.HooksConfiguration.OnWSTransportConnectionInit {
+			factory.OnWsConnectionInitCallback = d.onWsConnectionInitCallback()
+		}
+
+		return factory, nil
+	case wgpb.DataSourceKind_REST:
+		if d.requiresCustomHTTPClient(ds, ds.CustomRest.Fetch) {
+			client, err := d.newHTTPClient(ds, ds.CustomRest.Fetch)
+			if err != nil {
+				return nil, err
+			}
+			return d.rest.WithHTTPClient(client), nil
 		}
 		return d.rest, nil
 	case wgpb.DataSourceKind_STATIC:
@@ -148,15 +239,24 @@ func (d *DefaultFactoryResolver) Resolve(ds *wgpb.DataSourceConfiguration) (plan
 		wgpb.DataSourceKind_SQLSERVER,
 		wgpb.DataSourceKind_MONGODB,
 		wgpb.DataSourceKind_SQLITE:
+
+		if d.requiresCustomHTTPClient(ds, nil) {
+			client, err := d.newHTTPClient(ds, nil)
+			if err != nil {
+				return nil, err
+			}
+			return d.database.WithHTTPClient(client), nil
+		}
 		return d.database, nil
 	default:
 		return nil, fmt.Errorf("invalid datasource kind %q", ds.Kind)
 	}
 }
 
-func New(resolvers ...FactoryResolver) *EngineConfigLoader {
+func New(wundergraphDir string, resolvers ...FactoryResolver) *EngineConfigLoader {
 	return &EngineConfigLoader{
-		resolvers: resolvers,
+		wundergraphDir: wundergraphDir,
+		resolvers:      resolvers,
 	}
 }
 
@@ -249,15 +349,15 @@ func (l *EngineConfigLoader) Load(engineConfig wgpb.EngineConfiguration) (*plan.
 				typeMappings[i].InjectStatusCodeIntoResponse = in.CustomRest.StatusCodeTypeMappings[i].InjectStatusCodeIntoBody
 				typeMappings[i].StatusCodeByteString = []byte(strconv.Itoa(int(in.CustomRest.StatusCodeTypeMappings[i].StatusCode)))
 			}
-			baseURL := loadvariable.String(in.CustomRest.Fetch.GetBaseUrl())
-			path := loadvariable.String(in.CustomRest.Fetch.GetPath())
-			url := loadvariable.String(in.CustomRest.Fetch.GetUrl())
-			if url == "" {
-				url = baseURL + path
-			}
+
+			fetchUrl := buildFetchUrl(
+				loadvariable.String(in.CustomRest.Fetch.GetUrl()),
+				loadvariable.String(in.CustomRest.Fetch.GetBaseUrl()),
+				loadvariable.String(in.CustomRest.Fetch.GetPath()))
+
 			restConfig := oas_datasource.Configuration{
 				Fetch: oas_datasource.FetchConfiguration{
-					URL:           url,
+					URL:           fetchUrl,
 					Method:        in.CustomRest.Fetch.Method.String(),
 					Header:        header,
 					Query:         query,
@@ -283,19 +383,21 @@ func (l *EngineConfigLoader) Load(engineConfig wgpb.EngineConfiguration) (*plan.
 					header.Add(s, loadvariable.String(value))
 				}
 			}
-			baseURL := loadvariable.String(in.CustomGraphql.Fetch.GetBaseUrl())
-			path := loadvariable.String(in.CustomGraphql.Fetch.GetPath())
-			url := loadvariable.String(in.CustomGraphql.Fetch.GetUrl())
+
+			fetchUrl := buildFetchUrl(
+				loadvariable.String(in.CustomGraphql.Fetch.GetUrl()),
+				loadvariable.String(in.CustomGraphql.Fetch.GetBaseUrl()),
+				loadvariable.String(in.CustomGraphql.Fetch.GetPath()),
+			)
+
 			subscriptionUrl := loadvariable.String(in.CustomGraphql.Subscription.Url)
-			if url == "" {
-				url = baseURL + path
-			}
 			if subscriptionUrl == "" {
-				subscriptionUrl = url
+				subscriptionUrl = fetchUrl
 			}
+
 			out.Custom = graphql_datasource.ConfigJson(graphql_datasource.Configuration{
 				Fetch: graphql_datasource.FetchConfiguration{
-					URL:    url,
+					URL:    fetchUrl,
 					Method: in.CustomGraphql.Fetch.Method.String(),
 					Header: header,
 				},
@@ -304,7 +406,8 @@ func (l *EngineConfigLoader) Load(engineConfig wgpb.EngineConfiguration) (*plan.
 					ServiceSDL: in.CustomGraphql.Federation.ServiceSdl,
 				},
 				Subscription: graphql_datasource.SubscriptionConfiguration{
-					URL: subscriptionUrl,
+					URL:    subscriptionUrl,
+					UseSSE: in.CustomGraphql.Subscription.UseSSE,
 				},
 				UpstreamSchema: in.CustomGraphql.UpstreamSchema,
 			})
@@ -322,6 +425,7 @@ func (l *EngineConfigLoader) Load(engineConfig wgpb.EngineConfiguration) (*plan.
 				PrismaSchema:        l.addDataSourceToPrismaSchema(in.CustomDatabase.PrismaSchema, databaseURL, in.Kind),
 				GraphqlSchema:       in.CustomDatabase.GraphqlSchema,
 				CloseTimeoutSeconds: in.CustomDatabase.CloseTimeoutSeconds,
+				WunderGraphDir:      l.wundergraphDir,
 			}
 			for _, field := range in.CustomDatabase.JsonTypeFields {
 				config.JsonTypeFields = append(config.JsonTypeFields, database.SingleTypeField{
@@ -332,9 +436,7 @@ func (l *EngineConfigLoader) Load(engineConfig wgpb.EngineConfiguration) (*plan.
 			if config.CloseTimeoutSeconds == 0 {
 				config.CloseTimeoutSeconds = 30
 			}
-			for _, variable := range in.CustomDatabase.JsonInputVariables {
-				config.JsonInputVariables = append(config.JsonInputVariables, variable)
-			}
+			config.JsonInputVariables = append(config.JsonInputVariables, in.CustomDatabase.JsonInputVariables...)
 			out.Custom = database.ConfigJson(config)
 		default:
 			continue
@@ -402,4 +504,12 @@ func (l *EngineConfigLoader) addDataSourceToPrismaSchema(schema, databaseURL str
 
 `, databaseURL, provider)
 	return dataSource + schema
+}
+
+func buildFetchUrl(url, baseUrl, path string) string {
+	if url != "" {
+		return url
+	}
+
+	return fmt.Sprintf("%s/%s", strings.TrimSuffix(baseUrl, "/"), strings.TrimPrefix(path, "/"))
 }

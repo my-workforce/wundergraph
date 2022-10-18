@@ -2,60 +2,60 @@
 
 exports[`Introspection introspect GraphQL API with interface type definitions 1`] = `
 GraphQLApi {
-  "DataSources": Array [
-    Object {
-      "ChildNodes": Array [
-        Object {
-          "fieldNames": Array [
-            "id",
+  "DataSources": [
+    {
+      "ChildNodes": [
+        {
+          "fieldNames": [
             "displayName",
+            "hasVerifiedEmail",
+            "id",
+            "isLoggedIn",
+          ],
+          "typeName": "api_RegisteredUser",
+        },
+        {
+          "fieldNames": [
+            "displayName",
+            "id",
             "isLoggedIn",
           ],
           "typeName": "api_User",
         },
-        Object {
-          "fieldNames": Array [
-            "id",
-            "displayName",
-            "isLoggedIn",
-            "hasVerifiedEmail",
-          ],
-          "typeName": "api_RegisteredUser",
-        },
       ],
-      "Custom": Object {
-        "Federation": Object {
+      "Custom": {
+        "Federation": {
           "Enabled": false,
           "ServiceSDL": "",
         },
-        "Fetch": Object {
-          "baseUrl": Object {
+        "Fetch": {
+          "baseUrl": {
             "environmentVariableDefaultValue": "",
             "environmentVariableName": "",
             "kind": 0,
             "placeholderVariableName": "",
             "staticVariableContent": "",
           },
-          "body": Object {
+          "body": {
             "environmentVariableDefaultValue": "",
             "environmentVariableName": "",
             "kind": 0,
             "placeholderVariableName": "",
             "staticVariableContent": "",
           },
-          "header": Object {},
+          "header": {},
           "mTLS": undefined,
           "method": 1,
-          "path": Object {
+          "path": {
             "environmentVariableDefaultValue": "",
             "environmentVariableName": "",
             "kind": 0,
             "placeholderVariableName": "",
             "staticVariableContent": "",
           },
-          "query": Array [],
+          "query": [],
           "upstreamAuthentication": undefined,
-          "url": Object {
+          "url": {
             "environmentVariableDefaultValue": "",
             "environmentVariableName": "",
             "kind": 0,
@@ -64,38 +64,44 @@ GraphQLApi {
           },
           "urlEncodeBody": false,
         },
-        "Subscription": Object {
+        "HooksConfiguration": {
+          "onWSTransportConnectionInit": false,
+        },
+        "Subscription": {
           "Enabled": false,
-          "URL": Object {
+          "URL": {
             "environmentVariableDefaultValue": "",
             "environmentVariableName": "",
             "kind": 0,
             "placeholderVariableName": "",
-            "staticVariableContent": "ws://localhost:8080/graphql",
+            "staticVariableContent": "http://localhost:8080/graphql",
           },
+          "UseSSE": false,
         },
         "UpstreamSchema": "type Query {
   user: User
 }
 
-interface User {
-  id: ID!
+type RegisteredUser implements User {
   displayName: String!
+  hasVerifiedEmail: Boolean!
+  id: ID!
   isLoggedIn: Boolean!
 }
 
-type RegisteredUser implements User {
-  id: ID!
+interface User {
   displayName: String!
+  id: ID!
   isLoggedIn: Boolean!
-  hasVerifiedEmail: Boolean!
 }",
       },
-      "Directives": Array [],
+      "Directives": [],
+      "Id": undefined,
       "Kind": 2,
-      "RootNodes": Array [
-        Object {
-          "fieldNames": Array [
+      "RequestTimeoutSeconds": 0,
+      "RootNodes": [
+        {
+          "fieldNames": [
             "api_user",
           ],
           "typeName": "Query",
@@ -104,15 +110,15 @@ type RegisteredUser implements User {
     },
   ],
   "DefaultFlushInterval": 500,
-  "Fields": Array [
-    Object {
-      "argumentsConfiguration": Array [],
+  "Fields": [
+    {
+      "argumentsConfiguration": [],
       "disableDefaultFieldMapping": false,
       "fieldName": "api_user",
-      "path": Array [
+      "path": [
         "user",
       ],
-      "requiresFields": Array [],
+      "requiresFields": [],
       "typeName": "Query",
       "unescapeResponseJson": false,
     },
@@ -121,28 +127,28 @@ type RegisteredUser implements User {
   api_user: api_User
 }
 
-interface api_User {
-  id: ID!
+type api_RegisteredUser implements api_User {
   displayName: String!
+  hasVerifiedEmail: Boolean!
+  id: ID!
   isLoggedIn: Boolean!
 }
 
-type api_RegisteredUser implements api_User {
-  id: ID!
+interface api_User {
   displayName: String!
+  id: ID!
   isLoggedIn: Boolean!
-  hasVerifiedEmail: Boolean!
 }",
-  "Types": Array [
-    Object {
-      "renameTo": "User",
-      "typeName": "api_User",
-    },
-    Object {
+  "Types": [
+    {
       "renameTo": "RegisteredUser",
       "typeName": "api_RegisteredUser",
     },
+    {
+      "renameTo": "User",
+      "typeName": "api_User",
+    },
   ],
-  "interpolateVariableDefinitionAsJSON": Array [],
+  "interpolateVariableDefinitionAsJSON": [],
 }
 `;

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -27,7 +26,6 @@ import (
 	"github.com/rs/cors"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-	"github.com/wundergraph/wundergraph/pkg/apiconfig"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/wundergraph/graphql-go-tools/pkg/ast"
@@ -41,6 +39,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/pkg/graphql"
 	"github.com/wundergraph/graphql-go-tools/pkg/lexer/literal"
 	"github.com/wundergraph/graphql-go-tools/pkg/operationreport"
+
 	"github.com/wundergraph/wundergraph/internal/unsafebytes"
 	"github.com/wundergraph/wundergraph/pkg/apicache"
 	"github.com/wundergraph/wundergraph/pkg/authentication"
@@ -54,7 +53,7 @@ import (
 	"github.com/wundergraph/wundergraph/pkg/postresolvetransform"
 	"github.com/wundergraph/wundergraph/pkg/s3uploadclient"
 	"github.com/wundergraph/wundergraph/pkg/webhookhandler"
-	"github.com/wundergraph/wundergraph/types/go/wgpb"
+	"github.com/wundergraph/wundergraph/pkg/wgpb"
 )
 
 const (
@@ -66,7 +65,7 @@ const (
 type Builder struct {
 	router   *mux.Router
 	loader   *engineconfigloader.EngineConfigLoader
-	api      *wgpb.Api
+	api      *Api
 	resolver *resolve.Resolver
 	pool     *pool.Pool
 
@@ -126,7 +125,7 @@ func NewBuilder(pool *pool.Pool,
 	}
 }
 
-func (r *Builder) BuildAndMountApiHandler(ctx context.Context, router *mux.Router, api *wgpb.Api) (streamClosers []chan struct{}, err error) {
+func (r *Builder) BuildAndMountApiHandler(ctx context.Context, router *mux.Router, api *Api) (streamClosers []chan struct{}, err error) {
 
 	if api.CacheConfig != nil {
 		err = r.configureCache(api)
@@ -204,19 +203,9 @@ func (r *Builder) BuildAndMountApiHandler(ctx context.Context, router *mux.Route
 		})
 	}
 
-	r.router.Use(func(handler http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-			if r.enableDebugMode {
-				requestDump, err := httputil.DumpRequest(request, true)
-				if err == nil {
-					fmt.Printf("\n\n--- ClientRequest start ---\n\n%s\n\n\n\n--- ClientRequest end ---\n\n",
-						string(requestDump),
-					)
-				}
-			}
-			handler.ServeHTTP(w, request)
-		})
-	})
+	if r.enableDebugMode {
+		r.router.Use(logRequestMiddleware(os.Stderr))
+	}
 
 	if api.CorsConfiguration != nil {
 		corsMiddleware := cors.New(cors.Options{
@@ -294,15 +283,13 @@ func (r *Builder) BuildAndMountApiHandler(ctx context.Context, router *mux.Route
 			abstractlogger.String("path", path.Join(api.PathPrefix, apiPath)),
 		)
 
-		if err := registerGraphqlPlaygroundHandler(r.router, api.PathPrefix, apiPath); err != nil {
-			graphqlPlaygroundHandler := &GraphQLPlaygroundHandler{
-				log:           r.log,
-				html:          graphiql.GetGraphiqlPlaygroundHTML(),
-				apiPathPrefix: api.GetPathPrefix(),
-			}
-			r.router.Methods(http.MethodGet, http.MethodOptions).Path(apiPath).Handler(graphqlPlaygroundHandler)
+		graphqlPlaygroundHandler := &GraphQLPlaygroundHandler{
+			log:           r.log,
+			html:          graphiql.GetGraphiqlPlaygroundHTML(),
+			apiPathPrefix: api.PathPrefix,
+			nodeUrl:       api.Options.PublicNodeUrl,
 		}
-
+		r.router.Methods(http.MethodGet, http.MethodOptions).Path(apiPath).Handler(graphqlPlaygroundHandler)
 		r.log.Debug("registered GraphQLPlaygroundHandler",
 			abstractlogger.String("method", http.MethodGet),
 			abstractlogger.String("path", path.Join(api.PathPrefix, apiPath)),
@@ -311,6 +298,32 @@ func (r *Builder) BuildAndMountApiHandler(ctx context.Context, router *mux.Route
 	}
 
 	return streamClosers, err
+}
+
+func shouldLogRequestBody(request *http.Request) bool {
+	// If the request looks like a file upload, avoid printing the whole
+	// encoded file as a debug message.
+	return !strings.HasPrefix(request.Header.Get("Content-Type"), "multipart/form-data")
+}
+
+// returns a middleware that logs all requests to the given io.Writer
+func logRequestMiddleware(logger io.Writer) mux.MiddlewareFunc {
+	return func(handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			logBody := shouldLogRequestBody(request)
+			suffix := ""
+			if !logBody {
+				suffix = "<body omitted>"
+			}
+			requestDump, err := httputil.DumpRequest(request, logBody)
+			if err == nil {
+				fmt.Fprintf(logger, "\n\n--- ClientRequest start ---\n\n%s%s\n\n\n\n--- ClientRequest end ---\n\n",
+					string(requestDump), suffix,
+				)
+			}
+			handler.ServeHTTP(w, request)
+		})
+	}
 }
 
 func mergeRequiredFields(fields plan.FieldConfigurations, fieldsRequired plan.FieldConfigurations) plan.FieldConfigurations {
@@ -593,7 +606,7 @@ func (r *Builder) cleanupJsonSchema(schema string) string {
 	return schema
 }
 
-func (r *Builder) configureCache(api *wgpb.Api) (err error) {
+func (r *Builder) configureCache(api *Api) (err error) {
 	config := api.CacheConfig
 	switch config.Kind {
 	case wgpb.ApiCacheKind_IN_MEMORY_CACHE:
@@ -636,17 +649,12 @@ func (r *Builder) configureCache(api *wgpb.Api) (err error) {
 type GraphQLPlaygroundHandler struct {
 	log           abstractlogger.Logger
 	html          string
+	nodeUrl       string
 	apiPathPrefix string
 }
 
 func (h *GraphQLPlaygroundHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
-	protocol := "http"
-	if r.TLS != nil {
-		protocol = "https"
-	}
-
-	apiURL := protocol + "://" + path.Join(r.Host, h.apiPathPrefix)
+	apiURL := fmt.Sprintf("%s/%s", strings.TrimSuffix(h.nodeUrl, "/"), strings.TrimPrefix(h.apiPathPrefix, "/"))
 
 	tpl := strings.Replace(h.html, "{{apiURL}}", apiURL, 1)
 	resp := []byte(tpl)
@@ -733,8 +741,7 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	operationHash := shared.Hash.Sum64()
 
 	h.preparedMux.RLock()
-	var prepared planWithExtractedVariables
-	exists := false
+	prepared, exists := h.prepared[operationHash]
 	h.preparedMux.RUnlock()
 	if !exists {
 		prepared, err = h.preparePlan(operationHash, requestOperationName, shared)
@@ -776,7 +783,6 @@ func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		SendSSEPingMessage(*flushWriter, shared.Ctx.Context)
 		err := h.resolver.ResolveGraphQLSubscription(shared.Ctx, p.Response, flushWriter)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -1081,8 +1087,9 @@ func (h *QueryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "MockResolve query hook failed", http.StatusInternalServerError)
 			return
 		}
-		_, _ = w.Write(out.Response)
+
 		if out != nil {
+			_, _ = w.Write(out.Response)
 			updateContextHeaders(ctx, out.SetClientRequestHeaders)
 		} else {
 			h.log.Error("MockResolve query hook response is empty", abstractlogger.Bool("isLive", isLive))
@@ -1397,12 +1404,12 @@ func (h *QueryHandler) handleLiveQuery(r *http.Request, w http.ResponseWriter, c
 			if sse {
 				_, _ = w.Write([]byte("data: "))
 			}
-			_, err := reader.WriteTo(w)
+			_, _ = reader.WriteTo(w)
 			if subscribeOnce {
 				flusher.Flush()
 				return
 			}
-			_, err = w.Write(literal.LINETERMINATOR)
+			_, _ = w.Write(literal.LINETERMINATOR)
 			_, err = w.Write(literal.LINETERMINATOR)
 			if err != nil {
 				return
@@ -1563,8 +1570,9 @@ func (h *MutationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "MutatingPostResolve mutation hook failed", http.StatusInternalServerError)
 			return
 		}
-		ctx.Variables = out.Input
+
 		if out != nil {
+			ctx.Variables = out.Input
 			updateContextHeaders(ctx, out.SetClientRequestHeaders)
 		} else {
 			h.log.Error("MutatingPostResolve mutation hook response is empty")
@@ -1831,8 +1839,8 @@ func (r *Builder) registerAuth(pathPrefix string, insecureCookies bool) {
 		csrfSecret = []byte(b)
 	}
 
-	if apiconfig.HasCookieAuthEnabled(r.api) && (hashKey == nil || blockKey == nil || csrfSecret == nil) {
-		panic("hashkey, blockkey, csrfsecret invalid: This should never have happened, validation didn't detect broken configuration, someone broke the validation code")
+	if r.api == nil || r.api.HasCookieAuthEnabled() && (hashKey == nil || blockKey == nil || csrfSecret == nil) {
+		panic("API is nil or hashkey, blockkey, csrfsecret invalid: This should never have happened, validation didn't detect broken configuration, someone broke the validation code")
 	}
 
 	cookie := securecookie.New(hashKey, blockKey)
@@ -1841,16 +1849,19 @@ func (r *Builder) registerAuth(pathPrefix string, insecureCookies bool) {
 		jwksProviders = r.api.AuthenticationConfig.JwksBased.Providers
 	}
 
+	authHooks := authentication.Hooks{
+		Log:                        r.log,
+		Client:                     r.middlewareClient,
+		MutatingPostAuthentication: r.api.AuthenticationConfig.Hooks.MutatingPostAuthentication,
+		PostAuthentication:         r.api.AuthenticationConfig.Hooks.PostAuthentication,
+		PostLogout:                 r.api.AuthenticationConfig.Hooks.PostLogout,
+	}
+
 	loadUserConfig := authentication.LoadUserConfig{
 		Log:           r.log,
 		Cookie:        cookie,
 		JwksProviders: jwksProviders,
-		Hooks: authentication.Hooks{
-			Client:                     r.middlewareClient,
-			MutatingPostAuthentication: r.api.AuthenticationConfig.Hooks.MutatingPostAuthentication,
-			PostAuthentication:         r.api.AuthenticationConfig.Hooks.PostAuthentication,
-			Log:                        r.log,
-		},
+		Hooks:         authHooks,
 	}
 
 	r.router.Use(authentication.NewLoadUserMw(loadUserConfig))
@@ -1875,14 +1886,15 @@ func (r *Builder) registerAuth(pathPrefix string, insecureCookies bool) {
 	})
 	cookieBasedAuth.Path("/csrf").Methods(http.MethodGet, http.MethodOptions).Handler(&authentication.CSRFTokenHandler{})
 
-	r.registerCookieAuthHandlers(cookieBasedAuth, cookie, pathPrefix)
+	r.registerCookieAuthHandlers(cookieBasedAuth, cookie, authHooks, pathPrefix)
 }
 
-func (r *Builder) registerCookieAuthHandlers(router *mux.Router, cookie *securecookie.SecureCookie, pathPrefix string) {
+func (r *Builder) registerCookieAuthHandlers(router *mux.Router, cookie *securecookie.SecureCookie, authHooks authentication.Hooks, pathPrefix string) {
 
 	router.Path("/user/logout").Methods(http.MethodGet, http.MethodOptions).Handler(&authentication.UserLogoutHandler{
 		InsecureCookies:                  r.insecureCookies,
 		OpenIDConnectIssuersToLogoutURLs: r.configureOpenIDConnectIssuerLogoutURLs(),
+		Hooks:                            authHooks,
 	})
 
 	if r.api.AuthenticationConfig == nil || r.api.AuthenticationConfig.CookieBased == nil {
@@ -1898,7 +1910,7 @@ func (r *Builder) configureOpenIDConnectIssuerLogoutURLs() map[string]string {
 	issuerLogoutURLs := map[string]string{}
 
 	client := &http.Client{
-		Timeout: time.Second * 10,
+		Timeout: r.api.Options.DefaultTimeout,
 	}
 
 	for _, provider := range r.api.AuthenticationConfig.CookieBased.Providers {
@@ -1924,9 +1936,9 @@ func (r *Builder) configureOpenIDConnectIssuerLogoutURLs() map[string]string {
 			)
 			continue
 		}
-		if strings.HasSuffix(issuer, "/") {
-			issuer = issuer[:len(issuer)-1]
-		}
+
+		issuer = strings.TrimSuffix(issuer, "/")
+
 		introspectionURL := issuer + "/.well-known/openid-configuration"
 		req, err := http.NewRequest(http.MethodGet, introspectionURL, nil)
 		if err != nil {
@@ -1949,7 +1961,7 @@ func (r *Builder) configureOpenIDConnectIssuerLogoutURLs() map[string]string {
 			continue
 		}
 		defer resp.Body.Close()
-		data, err := ioutil.ReadAll(resp.Body)
+		data, err := io.ReadAll(resp.Body)
 		if err != nil {
 			r.log.Error("failed to read openid-configuration",
 				abstractlogger.Error(err),
@@ -2040,11 +2052,21 @@ func (r *Builder) configureCookieProvider(router *mux.Router, provider *wgpb.Aut
 		if provider.OidcConfig == nil {
 			return
 		}
+
+		queryParameters := make([]authentication.QueryParameter, 0, len(provider.OidcConfig.QueryParameters))
+		for _, p := range provider.OidcConfig.QueryParameters {
+			queryParameters = append(queryParameters, authentication.QueryParameter{
+				Name:  loadvariable.String(p.Name),
+				Value: loadvariable.String(p.Value),
+			})
+		}
+
 		openID := authentication.NewOpenIDConnectCookieHandler(r.log)
 		openID.Register(authorizeRouter, callbackRouter, authentication.OpenIDConnectConfig{
 			Issuer:             loadvariable.String(provider.OidcConfig.Issuer),
 			ClientID:           loadvariable.String(provider.OidcConfig.ClientId),
 			ClientSecret:       loadvariable.String(provider.OidcConfig.ClientSecret),
+			QueryParameters:    queryParameters,
 			ProviderID:         provider.Id,
 			PathPrefix:         pathPrefix,
 			InsecureCookies:    r.insecureCookies,
@@ -2075,7 +2097,7 @@ func (m *EndpointUnavailableHandler) ServeHTTP(w http.ResponseWriter, _ *http.Re
 }
 
 func updateContextHeaders(ctx *resolve.Context, headers map[string]string) {
-	if headers == nil || len(headers) == 0 {
+	if len(headers) == 0 {
 		return
 	}
 	httpHeader := http.Header{}

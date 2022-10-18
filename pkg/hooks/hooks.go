@@ -14,6 +14,7 @@ import (
 	"github.com/buger/jsonparser"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/jensneuse/abstractlogger"
+
 	"github.com/wundergraph/wundergraph/pkg/pool"
 )
 
@@ -63,6 +64,10 @@ func HeaderCSVToSlice(headers map[string]string) map[string][]string {
 	return result
 }
 
+type OnWsConnectionInitHookPayload struct {
+	Request WunderGraphRequest `json:"request"`
+}
+
 type OnRequestHookPayload struct {
 	Request       WunderGraphRequest `json:"request"`
 	OperationName string             `json:"operationName"`
@@ -106,6 +111,7 @@ const (
 	MutatingPreResolve         MiddlewareHook = "mutatingPreResolve"
 	MutatingPostResolve        MiddlewareHook = "mutatingPostResolve"
 	PostAuthentication         MiddlewareHook = "postAuthentication"
+	PostLogout                 MiddlewareHook = "postLogout"
 	MutatingPostAuthentication MiddlewareHook = "mutatingPostAuthentication"
 	RevalidateAuthentication   MiddlewareHook = "revalidateAuthentication"
 
@@ -113,6 +119,8 @@ const (
 	HttpTransportOnRequest MiddlewareHook = "onOriginRequest"
 	// HttpTransportOnResponse from the origin
 	HttpTransportOnResponse MiddlewareHook = "onOriginResponse"
+
+	WsTransportOnConnectionInit MiddlewareHook = "onConnectionInit"
 )
 
 type Client struct {
@@ -133,6 +141,7 @@ func NewClient(serverUrl string, logger abstractlogger.Logger) *Client {
 	httpClient.RequestLogHook = func(_ retryablehttp.Logger, req *http.Request, attempt int) {
 		logger.Debug("hook request call", abstractlogger.Int("attempt", attempt), abstractlogger.String("url", req.URL.String()))
 	}
+
 	return &Client{
 		serverUrl:  serverUrl,
 		httpClient: httpClient,
@@ -141,6 +150,10 @@ func NewClient(serverUrl string, logger abstractlogger.Logger) *Client {
 
 func (c *Client) DoGlobalRequest(ctx context.Context, hook MiddlewareHook, jsonData []byte) (*MiddlewareHookResponse, error) {
 	return c.doRequest(ctx, "global/httpTransport", hook, jsonData)
+}
+
+func (c *Client) DoWsTransportRequest(ctx context.Context, hook MiddlewareHook, jsonData []byte) (*MiddlewareHookResponse, error) {
+	return c.doRequest(ctx, "global/wsTransport", hook, jsonData)
 }
 
 func (c *Client) DoOperationRequest(ctx context.Context, operationName string, hook MiddlewareHook, jsonData []byte) (*MiddlewareHookResponse, error) {

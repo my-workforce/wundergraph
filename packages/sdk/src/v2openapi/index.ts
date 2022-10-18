@@ -2,7 +2,6 @@ import {
 	buildMTLSConfiguration,
 	buildUpstreamAuthentication,
 	DataSource,
-	HeadersBuilder,
 	OpenAPIIntrospection,
 	RESTApi,
 	RESTApiCustom,
@@ -32,7 +31,6 @@ import { ListTypeNode, NamedTypeNode } from 'graphql/language/ast';
 import {
 	ArgumentRenderConfiguration,
 	ArgumentSource,
-	ConfigurationVariable,
 	ConfigurationVariableKind,
 	DataSourceKind,
 	FieldConfiguration,
@@ -47,7 +45,10 @@ import {
 	applyNameSpaceToGraphQLSchema,
 	applyNameSpaceToTypeFields,
 } from '../definition/namespacing';
-import { mapInputVariable } from '../configure';
+import { mapInputVariable } from '../configure/variables';
+import { HeadersBuilder, mapHeaders } from '../definition/headers-builder';
+import { Logger } from '../logger';
+import _ from 'lodash';
 
 export const openApiSpecificationToRESTApiObject = async (
 	oas: string,
@@ -101,42 +102,10 @@ class RESTApiBuilder {
 		this.statusCodeUnions = introspection.statusCodeUnions || false;
 		this.introspection = introspection;
 		this.apiNamespace = introspection.apiNamespace;
-		introspection.headers !== undefined &&
-			(introspection.headers(new HeadersBuilder()) as HeadersBuilder).build().forEach((config) => {
-				const values: ConfigurationVariable[] = [];
-				switch (config.valueSource) {
-					case 'clientRequest':
-						values.push({
-							kind: ConfigurationVariableKind.STATIC_CONFIGURATION_VARIABLE,
-							staticVariableContent: `{{ .request.headers.${config.value} }}`,
-							environmentVariableName: '',
-							environmentVariableDefaultValue: '',
-							placeholderVariableName: '',
-						});
-						break;
-					case 'static':
-						values.push({
-							kind: ConfigurationVariableKind.STATIC_CONFIGURATION_VARIABLE,
-							staticVariableContent: config.value,
-							environmentVariableDefaultValue: '',
-							environmentVariableName: '',
-							placeholderVariableName: '',
-						});
-						break;
-					case 'env':
-						values.push({
-							kind: ConfigurationVariableKind.ENV_CONFIGURATION_VARIABLE,
-							staticVariableContent: '',
-							environmentVariableDefaultValue: '',
-							environmentVariableName: config.value,
-							placeholderVariableName: '',
-						});
-						break;
-				}
-				this.headers[config.key] = {
-					values,
-				};
-			});
+
+		if (introspection.headers !== undefined) {
+			this.headers = mapHeaders(introspection.headers(new HeadersBuilder()) as HeadersBuilder);
+		}
 	}
 
 	private statusCodeUnions: boolean;
@@ -147,6 +116,8 @@ class RESTApiBuilder {
 	private graphQLSchema: DocumentNode;
 	private dataSources: DataSource<RESTApiCustom>[] = [];
 	private fields: FieldConfiguration[] = [];
+	private baseUrlArgs: string[] = [];
+
 	public build = (): RESTApi => {
 		Object.keys(this.spec.paths).forEach((path) => {
 			const pathObject = this.spec.paths[path];
@@ -167,7 +138,7 @@ class RESTApiBuilder {
 			}
 		});
 		const filtered = this.filterEmptyTypes(this.graphQLSchema);
-		// const debug = print(filtered);
+		//const debug = print(filtered);
 		const schema = buildASTSchema(filtered);
 		const schemaString = printSchema(schema);
 		const dataSources = this.dataSources.map((ds) => {
@@ -177,6 +148,22 @@ class RESTApiBuilder {
 				ChildNodes: applyNameSpaceToTypeFields(ds.ChildNodes, schema, this.apiNamespace),
 			};
 		});
+		if (this.baseUrlArgs.length) {
+			this.baseUrlArgs.forEach((arg) => {
+				this.fields.map((field) => ({
+					...field,
+					argumentsConfiguration: [
+						...(field.argumentsConfiguration || []),
+						{
+							name: arg,
+							renderConfiguration: ArgumentRenderConfiguration.RENDER_ARGUMENT_AS_ARRAY_CSV,
+							sourceType: ArgumentSource.FIELD_ARGUMENT,
+							sourcePath: [arg],
+						},
+					],
+				}));
+			});
+		}
 		return new RESTApi(
 			applyNameSpaceToGraphQLSchema(schemaString, [], this.apiNamespace),
 			dataSources,
@@ -196,6 +183,9 @@ class RESTApiBuilder {
 			return;
 		}
 		const parentType = verb === HTTPMethod.GET ? 'Query' : 'Mutation';
+
+		const baseUrl = this.cleanupBaseURL(this.baseURL());
+
 		this.dataSources.push({
 			RootNodes: [
 				{
@@ -208,7 +198,7 @@ class RESTApiBuilder {
 				Fetch: {
 					method: verb,
 					path: mapInputVariable(path),
-					baseUrl: mapInputVariable(this.introspection.baseURL || this.baseURL()),
+					baseUrl: mapInputVariable(baseUrl),
 					url: mapInputVariable(''),
 					body: mapInputVariable(''),
 					header: this.headers,
@@ -225,7 +215,9 @@ class RESTApiBuilder {
 			},
 			ChildNodes: [],
 			Directives: [],
+			RequestTimeoutSeconds: this.introspection.requestTimeoutSeconds ?? 0,
 		});
+
 		this.fields.push({
 			typeName: parentType,
 			fieldName: fieldName,
@@ -276,6 +268,11 @@ class RESTApiBuilder {
 				statusCode: statusCode,
 				responseObjectDescription: responseObject!.description,
 			});
+			if (this.baseUrlArgs.length) {
+				this.baseUrlArgs.forEach((arg) => {
+					this.addArgument(parentType, fieldName, arg, 'String', ['non_null']);
+				});
+			}
 		});
 		const parameters = [...(pathItemObject.parameters || []), ...(operationObject.parameters || [])];
 		parameters.map(this.resolveParamsObject).forEach((param) => {
@@ -341,7 +338,7 @@ class RESTApiBuilder {
 					}
 					break;
 				case 'cookie':
-					console.log('param.in not implemented for cookie');
+					Logger.debug('param.in not implemented for cookie');
 					break;
 			}
 		});
@@ -541,10 +538,11 @@ class RESTApiBuilder {
 				if (fieldName !== '') {
 					let typeName = schema.title
 						? schema.title.replace(' ', '')
-						: fieldName[0].toUpperCase() + fieldName.substring(1);
+						: parentTypeName + fieldName[0].toUpperCase() + fieldName.substring(1);
 					if (objectKind === 'input') {
 						typeName += 'Input';
 					}
+					typeName = this.cleanupTypeName(typeName, parentTypeName);
 					let fieldTypeName = typeName;
 					if (this.statusCodeUnions && isRootField && objectKind === 'type') {
 						fieldTypeName = this.buildFieldTypeName(typeName, responseObjectDescription || '', statusCode || '');
@@ -670,14 +668,21 @@ class RESTApiBuilder {
 		return true;
 	};
 	private baseURL = (): string => {
+		if (this.introspection.baseURL) {
+			return this.introspection.baseURL;
+		}
 		if (!this.spec.servers || this.spec.servers.length === 0) {
 			throw new Error('OpenAPISpecification must contain server + url');
 		}
 		const secure = this.spec.servers.find((server) => server.url.startsWith('https'));
-		if (secure) {
-			return secure.url;
-		}
-		return this.spec.servers[0].url;
+		return secure ? secure.url : this.spec.servers[0].url;
+	};
+	private cleanupBaseURL = (url: string): string => {
+		return url.replace(/{[a-zA-Z]+}/, (str) => {
+			const arg = this.sanitizeName(str.substring(1, str.length - 1));
+			this.baseUrlArgs.push(arg);
+			return `{{ .arguments.${arg} }}`;
+		});
 	};
 	private buildScalarTypeDefinitionNode = (name: string): ScalarTypeDefinitionNode => {
 		return {
@@ -707,6 +712,11 @@ class RESTApiBuilder {
 			FieldDefinition: {
 				enter: (node) => {
 					if (node.name.value !== fieldName) {
+						return;
+					}
+					const arg = node.arguments?.find((arg) => arg.name.value === argumentName);
+					if (arg) {
+						done = true;
 						return;
 					}
 					const update: FieldDefinitionNode = {
@@ -826,6 +836,20 @@ class RESTApiBuilder {
 		enclosingTypes: EnclosingType[]
 	) => {
 		const fieldType = this.resolveTypeNode(fieldTypeName, enclosingTypes);
+		// remove non alphanumeric characters as well as leading numbers
+		const sanitizedFieldName = fieldName.replace(/[^a-zA-Z0-9_]/g, '').replace(/^[0-9]+/, '');
+		if (sanitizedFieldName !== fieldName) {
+			// add mapping
+			this.fields.push({
+				typeName: parentName,
+				fieldName: sanitizedFieldName,
+				disableDefaultFieldMapping: true,
+				path: [fieldName],
+				requiresFields: [],
+				unescapeResponseJson: false,
+				argumentsConfiguration: [],
+			});
+		}
 		if (objectKind === 'type') {
 			this.graphQLSchema = visit(this.graphQLSchema, {
 				ObjectTypeDefinition: (node) => {
@@ -840,7 +864,7 @@ class RESTApiBuilder {
 								kind: Kind.FIELD_DEFINITION,
 								name: {
 									kind: Kind.NAME,
-									value: fieldName,
+									value: sanitizedFieldName,
 								},
 								type: fieldType,
 							},
@@ -863,7 +887,7 @@ class RESTApiBuilder {
 								kind: Kind.INPUT_VALUE_DEFINITION,
 								name: {
 									kind: Kind.NAME,
-									value: fieldName,
+									value: sanitizedFieldName,
 								},
 								type: fieldType,
 							},
@@ -1155,6 +1179,23 @@ class RESTApiBuilder {
 
 	private sanitizeName = (name: string): string => {
 		return name.replace(/\[\]/g, '');
+	};
+
+	private cleanupTypeName = (typeName: string, parentTypeName: string): string => {
+		// remove all non-alphanumeric characters and all leading numbers
+		typeName = _.camelCase(typeName.replace(/[^_a-zA-Z0-9]/g, '_').replace(/^[0-9]+/, '_'));
+		parentTypeName = _.camelCase(parentTypeName.replace(/[^_a-zA-Z0-9]/g, '_').replace(/^[0-9]+/, '_'));
+		// and make the first character uppercase
+		typeName = typeName[0].toUpperCase() + typeName.substring(1);
+		parentTypeName = parentTypeName[0].toUpperCase() + parentTypeName.substring(1);
+		switch (typeName) {
+			case 'Query':
+			case 'Mutation':
+			case 'Subscription':
+				return parentTypeName + typeName;
+			default:
+				return typeName;
+		}
 	};
 }
 

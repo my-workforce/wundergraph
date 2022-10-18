@@ -5,7 +5,7 @@ on:
       - main
       - next
     tags-ignore:
-      - '*'
+      - '**'
     paths:
       - '**/*.go'
       - 'types/**/*'
@@ -57,19 +57,24 @@ jobs:
       - uses: ./.github/actions/node
         with:
           working-directory: ${{ env.WORKING_DIRECTORY }}
-          repo-token: ${{ secrets.GIT_TOKEN }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Protoc
-        uses: arduino/setup-protoc@v1
+        uses: abelfodil/protoc-action@v1
         with:
-          version: '3.x'
-          repo-token: ${{ secrets.GIT_TOKEN }}
+          protoc-version: '21.5'
 
       - run: make bootstrap-minio
 
       - run: pnpm install --ignore-scripts
 
       - run: make engine-dev
+
+      - name: Check if git is not dirty after generating files
+        run: git diff --no-ext-diff --exit-code
+
+      - name: Linters
+        uses: golangci/golangci-lint-action@v3
 
       - name: Run unit and integration tests
         run: make test-go

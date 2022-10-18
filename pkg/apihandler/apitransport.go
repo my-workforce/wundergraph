@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,32 +13,56 @@ import (
 
 	"github.com/buger/jsonparser"
 	"github.com/dgrijalva/jwt-go"
+	"github.com/gorilla/websocket"
+
 	"github.com/wundergraph/graphql-go-tools/pkg/pool"
+
+	"github.com/wundergraph/wundergraph/pkg/authentication"
 	"github.com/wundergraph/wundergraph/pkg/hooks"
 	"github.com/wundergraph/wundergraph/pkg/loadvariable"
 	pool2 "github.com/wundergraph/wundergraph/pkg/pool"
-	"github.com/wundergraph/wundergraph/types/go/wgpb"
-
-	"github.com/wundergraph/wundergraph/pkg/authentication"
+	"github.com/wundergraph/wundergraph/pkg/wgpb"
 )
+
+type ApiTransportFactory interface {
+	RoundTripper(tripper http.RoundTripper, enableStreamingMode bool) http.RoundTripper
+	DefaultTransportTimeout() time.Duration
+}
+
+type apiTransportFactory struct {
+	api             *Api
+	hooksClient     *hooks.Client
+	enableDebugMode bool
+}
+
+func (f *apiTransportFactory) RoundTripper(tripper http.RoundTripper, enableStreamingMode bool) http.RoundTripper {
+	return NewApiTransport(tripper, f.api, f.hooksClient, f.enableDebugMode, enableStreamingMode)
+}
+
+func (f *apiTransportFactory) DefaultTransportTimeout() time.Duration {
+	return f.api.Options.DefaultTimeout
+}
 
 type ApiTransport struct {
 	roundTripper               http.RoundTripper
-	api                        *wgpb.Api
+	api                        *Api
 	debugMode                  bool
 	upstreamAuthConfigurations map[string]*wgpb.UpstreamAuthentication
 	onRequestHook              map[string]struct{}
 	onResponseHook             map[string]struct{}
 	hooksClient                *hooks.Client
+	enableStreamingMode        bool
 }
 
-func NewApiTransportFactory(api *wgpb.Api, hooksClient *hooks.Client, enableDebugMode bool) func(tripper http.RoundTripper) http.RoundTripper {
-	return func(tripper http.RoundTripper) http.RoundTripper {
-		return NewApiTransport(tripper, api, hooksClient, enableDebugMode)
+func NewApiTransportFactory(api *Api, hooksClient *hooks.Client, enableDebugMode bool) ApiTransportFactory {
+	return &apiTransportFactory{
+		api:             api,
+		hooksClient:     hooksClient,
+		enableDebugMode: enableDebugMode,
 	}
 }
 
-func NewApiTransport(tripper http.RoundTripper, api *wgpb.Api, hooksClient *hooks.Client, enableDebugMode bool) http.RoundTripper {
+func NewApiTransport(tripper http.RoundTripper, api *Api, hooksClient *hooks.Client, enableDebugMode bool, enableStreamingMode bool) http.RoundTripper {
 	transport := &ApiTransport{
 		roundTripper:               tripper,
 		debugMode:                  enableDebugMode,
@@ -47,6 +71,7 @@ func NewApiTransport(tripper http.RoundTripper, api *wgpb.Api, hooksClient *hook
 		onResponseHook:             map[string]struct{}{},
 		onRequestHook:              map[string]struct{}{},
 		hooksClient:                hooksClient,
+		enableStreamingMode:        enableStreamingMode,
 	}
 
 	if api.EngineConfiguration != nil && api.EngineConfiguration.DatasourceConfigurations != nil {
@@ -74,10 +99,10 @@ func NewApiTransport(tripper http.RoundTripper, api *wgpb.Api, hooksClient *hook
 
 	for i := range api.Operations {
 		name := api.Operations[i].Name
-		if api.Operations[i].HooksConfiguration.HttpTransportOnRequest == true {
+		if api.Operations[i].HooksConfiguration.HttpTransportOnRequest {
 			transport.onRequestHook[name] = struct{}{}
 		}
-		if api.Operations[i].HooksConfiguration.HttpTransportOnResponse == true {
+		if api.Operations[i].HooksConfiguration.HttpTransportOnResponse {
 			transport.onResponseHook[name] = struct{}{}
 		}
 	}
@@ -108,10 +133,13 @@ func (t *ApiTransport) RoundTrip(request *http.Request) (*http.Response, error) 
 }
 
 func (t *ApiTransport) roundTrip(request *http.Request) (res *http.Response, err error) {
-
 	var (
 		onRequestHook, onResponseHook bool
 	)
+
+	// this evaluation needs to happen on the original request
+	// if you're doing this after calling the onRequest hook, it won't work
+	isUpgradeRequest := websocket.IsWebSocketUpgrade(request)
 
 	metaData := getOperationMetaData(request)
 	if metaData != nil {
@@ -141,14 +169,14 @@ func (t *ApiTransport) roundTrip(request *http.Request) (res *http.Response, err
 
 	// in case of http Upgrade requests, we must not dump the response
 	// otherwise, the upgrade will fail
-	if request.Header.Get("Upgrade") != "" {
+	if isUpgradeRequest || t.enableStreamingMode {
 		if t.debugMode {
 			fmt.Printf("\n\n--- DebugTransport ---\n\nRequest:\n\n%s\n\nDuration: %d ms\n\n--- DebugTransport\n\n",
 				string(requestDump),
 				duration,
 			)
 		}
-		return t.roundTripper.RoundTrip(request)
+		return
 	}
 
 	if t.debugMode {
@@ -216,9 +244,12 @@ func (t *ApiTransport) internalGraphQLRoundTrip(request *http.Request) (res *htt
 			return nil, err
 		}
 		requestBody, err = jsonparser.Set(requestBody, requestJSON, "__wg", "clientRequest")
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	req, err := http.NewRequestWithContext(request.Context(), request.Method, request.URL.String(), ioutil.NopCloser(bytes.NewReader(requestBody)))
+	req, err := http.NewRequestWithContext(request.Context(), request.Method, request.URL.String(), io.NopCloser(bytes.NewReader(requestBody)))
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +265,7 @@ func (t *ApiTransport) handleOnRequestHook(r *http.Request, metaData *OperationM
 		err  error
 	)
 	if r.Body != nil {
-		body, err = ioutil.ReadAll(r.Body)
+		body, err = io.ReadAll(r.Body)
 		if err != nil {
 			return nil, err
 		}
@@ -270,7 +301,7 @@ func (t *ApiTransport) handleOnRequestHook(r *http.Request, metaData *OperationM
 		return nil, err
 	}
 	if response.Skip {
-		r.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+		r.Body = io.NopCloser(bytes.NewBuffer(body))
 		return r, nil
 	}
 	if response.Cancel {
@@ -288,7 +319,7 @@ func (t *ApiTransport) handleOnRequestHook(r *http.Request, metaData *OperationM
 }
 
 func (t *ApiTransport) handleOnResponseHook(r *http.Response, metaData *OperationMetaData) (*http.Response, error) {
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +356,7 @@ func (t *ApiTransport) handleOnResponseHook(r *http.Response, metaData *Operatio
 		return nil, err
 	}
 	if response.Skip {
-		r.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+		r.Body = io.NopCloser(bytes.NewBuffer(body))
 		return r, nil
 	}
 	if response.Cancel {
@@ -333,7 +364,7 @@ func (t *ApiTransport) handleOnResponseHook(r *http.Response, metaData *Operatio
 	}
 	if response.Response != nil {
 		r.StatusCode = response.Response.StatusCode
-		r.Body = ioutil.NopCloser(bytes.NewBuffer(response.Response.Body))
+		r.Body = io.NopCloser(bytes.NewBuffer(response.Response.Body))
 		r.Header = hooks.HeaderCSVToSlice(response.Response.Headers)
 	}
 	return r, nil

@@ -1,23 +1,32 @@
-import { InternalClient } from './internal-client';
+import { InternalClient, InternalClientFactory } from './internal-client';
 import { FastifyLoggerInstance } from 'fastify';
 import { Headers } from '@web-std/fetch';
 import { HooksConfiguration } from '../configure';
 import { GraphQLServerConfig } from './plugins/graphql';
-import { middlewarePort } from '../env';
 import { WunderGraphConfiguration } from '@wundergraph/protobuf';
 import { WebhooksConfig } from '../webhooks/types';
-
-export const SERVER_PORT = middlewarePort;
+import { ServerOptions } from '../configure/options';
 
 declare module 'fastify' {
 	interface FastifyRequest extends FastifyRequestContext {}
 }
 
-export interface FastifyRequestContext<User = any, IC = InternalClient> {
-	ctx: BaseRequestContext<User, IC> & AuthenticationRequestContext<User>;
+export type AuthenticationHookRequest<
+	User extends WunderGraphUser = WunderGraphUser,
+	IC extends InternalClient = InternalClient
+> = BaseRequestContext<User, IC> & AuthenticationRequestContext<User>;
+
+export interface FastifyRequestContext<
+	User extends WunderGraphUser = WunderGraphUser,
+	IC extends InternalClient = InternalClient
+> {
+	ctx: AuthenticationHookRequest<User, IC>;
 }
 
-export interface BaseRequestContext<User = any, IC = InternalClient> {
+export interface BaseRequestContext<
+	User extends WunderGraphUser = WunderGraphUser,
+	IC extends InternalClient = InternalClient
+> {
 	/**
 	 * The user that is currently logged in.
 	 */
@@ -33,8 +42,7 @@ export interface BaseRequestContext<User = any, IC = InternalClient> {
 	 */
 	internalClient: IC;
 }
-
-export interface AuthenticationRequestContext<User = any> {
+export interface AuthenticationRequestContext<User extends WunderGraphUser = WunderGraphUser> {
 	/**
 	 * The user that is currently logged in.
 	 */
@@ -67,11 +75,17 @@ export interface WunderGraphResponse extends WunderGraphRequest {
 	statusCode: number;
 }
 
+export interface WsTransportOnConnectionInitResponse {
+	payload: JSONObject;
+}
+
 export type JSONValue = string | number | boolean | JSONObject | Array<JSONValue>;
 
 export type JSONObject = { [key: string]: JSONValue };
 
-export interface WunderGraphUser<Role = any> {
+// Changed the default type of Role to any.
+// It should be worked on
+export interface WunderGraphUser<Role extends string = any> {
 	provider?: string;
 	providerId?: string;
 	email?: string;
@@ -95,13 +109,12 @@ export interface WunderGraphUser<Role = any> {
 	rawIdToken?: string;
 }
 
-export interface ServerOptions {
-	port: number;
-	host: string;
+export interface ServerRunOptions {
 	wundergraphDir: string;
 	serverConfig: WunderGraphHooksAndServerConfig;
 	config: WunderGraphConfiguration;
 	gracefulShutdown: boolean;
+	clientFactory: InternalClientFactory;
 }
 
 export interface WunderGraphServerConfig<
@@ -112,6 +125,7 @@ export interface WunderGraphServerConfig<
 	hooks?: GeneratedHooksConfig;
 	// routeUrl is set internally
 	graphqlServers?: Omit<GraphQLServerConfig, 'routeUrl'>[];
+	options?: ServerOptions;
 }
 
 // internal representation of the fully resolved server config
@@ -121,13 +135,21 @@ export interface WunderGraphHooksAndServerConfig<
 > extends WunderGraphServerConfig<GeneratedHooksConfig, GeneratedWebhooksConfig> {
 	webhooks?: GeneratedWebhooksConfig;
 	hooks?: GeneratedHooksConfig;
-	// url of the server is set internally by the hooks server
-	graphqlServers?: (GraphQLServerConfig & { url: string })[];
+	graphqlServers?: GraphQLServerConfig[];
+	options?: ServerOptions;
 }
 
-export type AuthenticationResponse<User> = AuthenticationOK<User> | AuthenticationDeny;
+export interface FastifyRequestBody {
+	__wg: { user?: WunderGraphUser; clientRequest?: ClientRequest };
+}
 
-export interface AuthenticationOK<User = any> {
+export interface OnConnectionInitHookRequestBody extends FastifyRequestBody {
+	request: WunderGraphRequest;
+}
+
+export type AuthenticationResponse<User extends WunderGraphUser> = AuthenticationOK<User> | AuthenticationDeny;
+
+export interface AuthenticationOK<User extends WunderGraphUser> {
 	status: 'ok';
 	user: User;
 }

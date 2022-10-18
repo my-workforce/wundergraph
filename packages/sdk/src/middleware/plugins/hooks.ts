@@ -1,12 +1,12 @@
 import { FastifyPluginAsync, RawReplyDefaultExpression, RouteHandlerMethod } from 'fastify';
-import { WunderGraphRequest, WunderGraphResponse, ClientRequestHeaders, AuthenticationOK } from '../types';
+import { ClientRequestHeaders, WunderGraphRequest, WunderGraphResponse } from '../types';
 import {
 	HooksConfiguration,
 	HooksConfigurationOperationType,
-	OperationHooksConfiguration,
 	OperationHookFunction,
+	OperationHooksConfiguration,
 } from '../../configure';
-import { WunderGraphConfiguration, OperationType } from '@wundergraph/protobuf';
+import { OperationType, WunderGraphConfiguration } from '@wundergraph/protobuf';
 import { RawRequestDefaultExpression, RawServerDefault } from 'fastify/types/utils';
 import { Headers } from '@web-std/fetch';
 
@@ -38,54 +38,76 @@ const FastifyHooksPlugin: FastifyPluginAsync<FastifyHooksOptions> = async (fasti
 		return headersObj;
 	};
 
-	// authentication
-	fastify.post<{ Body: {} }>('/authentication/postAuthentication', async (request, reply) => {
-		reply.type('application/json').code(200);
-		if (config.authentication?.postAuthentication !== undefined && request.ctx.user !== undefined) {
-			try {
-				await config.authentication.postAuthentication(request.ctx);
-			} catch (err) {
-				request.log.error(err);
-				reply.code(500);
-				return { hook: 'postAuthentication', error: err };
+	await fastify.register(async (fastify) => {
+		fastify.addHook('preHandler', (request, reply, done) => {
+			if (request.ctx.user === undefined) {
+				request.log.error("User context doesn't exist");
+				reply.code(400).send({ error: "User context doesn't exist" });
 			}
+			done();
+		});
+
+		// authentication
+		if (config.authentication?.postAuthentication) {
+			fastify.post<{ Body: {} }>('/authentication/postAuthentication', async (request, reply) => {
+				try {
+					await config.authentication?.postAuthentication?.(request.ctx);
+				} catch (err) {
+					request.log.error(err);
+					reply.code(500).send({ hook: 'postAuthentication', error: err });
+				}
+				reply.code(200).send({
+					hook: 'postAuthentication',
+				});
+			});
 		}
-		return {
-			hook: 'postAuthentication',
-		};
-	});
-	fastify.post('/authentication/mutatingPostAuthentication', async (request, reply) => {
-		reply.type('application/json').code(200);
-		if (config.authentication?.mutatingPostAuthentication !== undefined && request.ctx.user !== undefined) {
-			try {
-				const out = await config.authentication.mutatingPostAuthentication(request.ctx);
-				return {
-					hook: 'mutatingPostAuthentication',
-					response: out,
-					setClientRequestHeaders: headersToObject(request.ctx.clientRequest.headers),
-				};
-			} catch (err) {
-				request.log.error(err);
-				reply.code(500);
-				return { hook: 'mutatingPostAuthentication', error: err };
-			}
+
+		if (config.authentication?.mutatingPostAuthentication) {
+			fastify.post('/authentication/mutatingPostAuthentication', async (request, reply) => {
+				try {
+					const out = await config.authentication?.mutatingPostAuthentication?.(request.ctx);
+					reply.code(200).send({
+						hook: 'mutatingPostAuthentication',
+						response: out,
+						setClientRequestHeaders: headersToObject(request.ctx.clientRequest.headers),
+					});
+				} catch (err) {
+					request.log.error(err);
+					reply.code(500).send({ hook: 'mutatingPostAuthentication', error: err });
+				}
+			});
 		}
-	});
-	fastify.post<{ Body: {} }>('/authentication/revalidateAuthentication', async (request, reply) => {
-		reply.type('application/json').code(200);
-		if (config.authentication?.revalidate !== undefined && request.ctx.user !== undefined) {
-			try {
-				const out = await config.authentication.revalidate(request.ctx);
-				return {
-					hook: 'revalidateAuthentication',
-					response: out,
-					setClientRequestHeaders: headersToObject(request.ctx.clientRequest.headers),
-				};
-			} catch (err) {
-				request.log.error(err);
-				reply.code(500);
-				return { hook: 'revalidateAuthentication', error: err };
-			}
+
+		if (config.authentication?.revalidate) {
+			fastify.post<{ Body: {} }>('/authentication/revalidateAuthentication', async (request, reply) => {
+				try {
+					const out = await config.authentication?.revalidate?.(request.ctx);
+					reply.code(200).send({
+						hook: 'revalidateAuthentication',
+						response: out,
+						setClientRequestHeaders: headersToObject(request.ctx.clientRequest.headers),
+					});
+				} catch (err) {
+					request.log.error(err);
+					reply.code(500).send({ hook: 'revalidateAuthentication', error: err });
+				}
+			});
+		}
+
+		if (config.authentication?.postLogout) {
+			fastify.post('/authentication/postLogout', async (request, reply) => {
+				try {
+					const out = await config.authentication?.postLogout?.(request.ctx);
+					reply.code(200).send({
+						hook: 'postLogout',
+						response: out,
+						setClientRequestHeaders: headersToObject(request.ctx.clientRequest.headers),
+					});
+				} catch (err) {
+					request.log.error(err);
+					reply.code(500).send({ hook: 'postLogout', error: err });
+				}
+			});
 		}
 	});
 
@@ -168,6 +190,36 @@ const FastifyHooksPlugin: FastifyPluginAsync<FastifyHooksOptions> = async (fasti
 			return { hook: 'onOriginResponse', error: err };
 		}
 	});
+
+	// wsTransport
+	if (config.global?.wsTransport?.onConnectionInit) {
+		fastify.post<{
+			Body: {
+				request: WunderGraphRequest;
+			};
+		}>(`/global/wsTransport/onConnectionInit`, async (request, reply) => {
+			reply.type('application/json').code(200);
+			try {
+				const resp = await config.global?.wsTransport?.onConnectionInit?.hook({
+					...request.ctx,
+					request: {
+						...request.body.request,
+						headers: new Headers(request.body.request.headers),
+					},
+				});
+				return {
+					hook: 'onConnectionInit',
+					response: resp,
+				};
+			} catch (err) {
+				request.log.error(err);
+				reply.code(504).send({ hook: 'onConnectionInit', error: err });
+			}
+			reply.code(200).send({
+				hook: 'onConnectionInit',
+			});
+		});
+	}
 
 	const queries =
 		config.config.api?.operations.filter((op) => op.operationType == OperationType.QUERY).map((op) => op.name) || [];

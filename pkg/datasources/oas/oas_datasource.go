@@ -11,11 +11,13 @@ import (
 	"strings"
 
 	"github.com/buger/jsonparser"
+
 	"github.com/wundergraph/graphql-go-tools/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/pkg/engine/datasource/httpclient"
 	"github.com/wundergraph/graphql-go-tools/pkg/engine/plan"
 	"github.com/wundergraph/graphql-go-tools/pkg/lexer/literal"
 	"github.com/wundergraph/graphql-go-tools/pkg/pool"
+
 	"github.com/wundergraph/wundergraph/pkg/customhttpclient"
 )
 
@@ -45,6 +47,12 @@ func (p *Planner) EnterOperationDefinition(ref int) {
 
 type Factory struct {
 	Client *http.Client
+}
+
+func (f *Factory) WithHTTPClient(client *http.Client) *Factory {
+	return &Factory{
+		Client: client,
+	}
 }
 
 func (f *Factory) Planner(ctx context.Context) plan.DataSourcePlanner {

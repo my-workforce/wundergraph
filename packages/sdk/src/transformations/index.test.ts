@@ -3,7 +3,7 @@ import { GraphQLApi } from '../definition';
 import { parse, print } from 'graphql';
 import { ArgumentRenderConfiguration, ArgumentSource, DataSourceKind, HTTPMethod } from '@wundergraph/protobuf';
 import transformApi from './index';
-import { mapInputVariable } from '../configure';
+import { mapInputVariable } from '../configure/variables';
 
 test('renameTypes', async () => {
 	const schema = `type User {name: String!} type Query {me: User!}`;
@@ -34,6 +34,7 @@ test('renameTypes', async () => {
 							Subscription: {
 								Enabled: false,
 								URL: mapInputVariable(''),
+								UseSSE: false,
 							},
 							Fetch: {
 								method: HTTPMethod.POST,
@@ -48,8 +49,12 @@ test('renameTypes', async () => {
 								urlEncodeBody: false,
 							},
 							UpstreamSchema: '',
+							HooksConfiguration: {
+								onWSTransportConnectionInit: false,
+							},
 						},
 						Directives: [],
+						RequestTimeoutSeconds: 0,
 					},
 				],
 				[
@@ -98,6 +103,7 @@ test('renameTypes', async () => {
 					Subscription: {
 						Enabled: false,
 						URL: mapInputVariable(''),
+						UseSSE: false,
 					},
 					Fetch: {
 						method: HTTPMethod.POST,
@@ -112,8 +118,12 @@ test('renameTypes', async () => {
 						urlEncodeBody: false,
 					},
 					UpstreamSchema: '',
+					HooksConfiguration: {
+						onWSTransportConnectionInit: false,
+					},
 				},
 				Directives: [],
+				RequestTimeoutSeconds: 0,
 			},
 		],
 		[
@@ -163,6 +173,7 @@ test('renameTypeFields', async () => {
 							Subscription: {
 								Enabled: false,
 								URL: mapInputVariable(''),
+								UseSSE: false,
 							},
 							Fetch: {
 								method: HTTPMethod.POST,
@@ -177,8 +188,12 @@ test('renameTypeFields', async () => {
 								urlEncodeBody: false,
 							},
 							UpstreamSchema: '',
+							HooksConfiguration: {
+								onWSTransportConnectionInit: false,
+							},
 						},
 						Directives: [],
+						RequestTimeoutSeconds: 0,
 					},
 				],
 				[
@@ -246,6 +261,7 @@ test('renameTypeFields', async () => {
 							Subscription: {
 								Enabled: false,
 								URL: mapInputVariable(''),
+								UseSSE: false,
 							},
 							Fetch: {
 								method: HTTPMethod.POST,
@@ -260,8 +276,12 @@ test('renameTypeFields', async () => {
 								urlEncodeBody: false,
 							},
 							UpstreamSchema: '',
+							HooksConfiguration: {
+								onWSTransportConnectionInit: false,
+							},
 						},
 						Directives: [],
+						RequestTimeoutSeconds: 0,
 					},
 				],
 				[

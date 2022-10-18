@@ -13,20 +13,24 @@ interface InternalClientRequestContext {
 		clientRequest?: ClientRequest;
 	};
 }
-interface Operations {
-	queries: {
-		[operationName: string]: any;
-	};
-	mutations: {
-		[operationName: string]: any;
-	};
+export interface Operations<
+	Queries extends OperationDefinitions = OperationDefinitions,
+	Mutations extends OperationDefinitions = OperationDefinitions
+> {
+	queries: Queries;
+	mutations: Mutations;
 }
 
-export interface InternalClient extends Operations {
-	withHeaders: (headers: { [key: string]: string }) => InternalClient;
+export interface OperationDefinitions {
+	[operationName: string]: any;
 }
 
-const hooksToken = `Bearer ${process.env.HOOKS_TOKEN}`;
+export interface InternalClient<
+	Queries extends OperationDefinitions = OperationDefinitions,
+	Mutations extends OperationDefinitions = OperationDefinitions
+> extends Operations<Queries, Mutations> {
+	withHeaders: (headers: { [key: string]: string }) => InternalClient<Queries, Mutations>;
+}
 
 export interface InternalClientFactory {
 	(extraHeaders?: { [p: string]: string } | undefined, clientRequest?: ClientRequest): InternalClient;
@@ -37,7 +41,8 @@ export interface InternalClientFactory {
 export const internalClientFactory = (
 	apiName: string,
 	deploymentName: string,
-	operations: Operation[]
+	operations: Operation[],
+	baseNodeUrl: string
 ): InternalClientFactory => {
 	const baseOperations: Operations & InternalClientRequestContext = {
 		context: {
@@ -93,12 +98,11 @@ export const internalClientFactory = (
 		extraHeaders?: { [key: string]: string };
 		clientRequest: any;
 	}): Promise<any> => {
-		const url = `http://localhost:9991/internal/${apiName}/${deploymentName}/operations/` + options.operationName;
+		const url = `${baseNodeUrl}/internal/${apiName}/${deploymentName}/operations/` + options.operationName;
 		const headers = Object.assign(
 			{},
 			{
 				'Content-Type': 'application/json',
-				'X-WG-Authorization': hooksToken,
 				...(options.extraHeaders || {}),
 			}
 		);

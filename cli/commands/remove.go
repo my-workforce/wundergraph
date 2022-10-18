@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
 	"github.com/wundergraph/wundergraph/pkg/files"
 	"github.com/wundergraph/wundergraph/pkg/manifest"
 )
@@ -16,13 +17,14 @@ var removeCmd = &cobra.Command{
 	Example: `wunderctl remove spacex/spacex`,
 	Args:    cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, dependencies []string) error {
-		wgDir, err := files.FindWunderGraphDir(wundergraphDir)
+
+		wunderGraphDir, err := files.FindWunderGraphDir(_wunderGraphDirConfig)
 		if err != nil {
 			return err
 		}
 
 		client := InitWunderGraphApiClient()
-		man := manifest.New(log, client, wgDir)
+		man := manifest.New(log, client, wunderGraphDir)
 		err = man.Load()
 		if err != nil {
 			return fmt.Errorf("unable to load wundergraph.manifest.json")
